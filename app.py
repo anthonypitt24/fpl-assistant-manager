@@ -99,7 +99,6 @@ def calc_blended_score(player):
     dgw_bonus = 8 if player["next_gw_fixtures"] >= 2 else 0
     bgw_penalty = 20 if player["next_gw_fixtures"] == 0 else 0
 
-    # Underlying Opta threat / chance involvement bonus
     opta_attacking = min(player["xgi90"] * 10, 12)
     defensive_component = 0
     if player["position"] in ("GK", "DEF") and player["xgc90"] > 0:
@@ -1232,14 +1231,14 @@ with tabs[10]:
     if "GEMINI_API_KEY" not in st.secrets:
         st.warning("GEMINI_API_KEY not found in Streamlit Secrets. Please add it in App Settings -> Secrets.")
     else:
-        # Manager PIN Gate
+        # Manager PIN Gate (hidden code)
         pin_input = st.text_input("Enter Manager PIN to unlock Assistant", type="password", placeholder="Enter 4-digit PIN")
         
         if pin_input != "2325":
             if pin_input:
                 st.error("Incorrect PIN. Access restricted.")
             else:
-                st.info("🔒 Enter PIN `2325` to activate the AI Assistant.")
+                st.info("🔒 Enter Manager PIN to activate the AI Assistant.")
         else:
             st.success("🔓 Assistant unlocked.")
 
