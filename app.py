@@ -1,3 +1,4 @@
+from google import genai
 import streamlit as st
 import requests
 import pandas as pd
@@ -823,6 +824,7 @@ tabs = st.tabs([
     "🕵️ Mini-League",
     "🏆 Best XI",
     "🛠️ Wildcard",
+    "💬 AI Assistant",
 ]) 
 
 
@@ -1398,6 +1400,46 @@ with tabs[9]:
         } for p in sorted(squad, key=lambda p: (p["position"], -blended_score(p)))]
 
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # ==============================================================================
+# TAB 11 - AI ASSISTANT
+# ==============================================================================
+
+with tabs[10]:
+  st.header("💬 FPL AI Assistant")
+
+  client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+  if "chat_session" not in st.session_state:
+    st.session_state.chat_session = client.chats.create(
+        model="gemini-2.5-flash",
+        config={
+            "system_instruction": (
+                "You are an expert Fantasy Premier League (FPL) assistant. "
+                "Provide sharp, data-driven advice on transfers, captaincy, "
+                "fixtures, and chip strategy."
+            )
+        },
+    )
+    st.session_state.messages = []
+
+  for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+      st.markdown(msg["content"])
+
+  if prompt := st.chat_input("Ask about transfers, captain picks, or form..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+      st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+      response = st.session_state.chat_session.send_message(prompt)
+      st.markdown(response.text)
+
+    st.session_state.messages.append(
+        {"role": "assistant", "content": response.text}
+    )
+
 
 
 # ============================================================
