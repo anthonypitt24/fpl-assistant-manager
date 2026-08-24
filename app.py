@@ -1,7 +1,14 @@
 import streamlit as st
 import requests
+import pandas as pd
 import itertools
-from collections import defaultdict
+import math
+from collections import Counter
+
+# ============================================================
+# FPL ASSISTANT MANAGER
+# Fast version - single file
+# ============================================================
 
 st.set_page_config(
     page_title="FPL Assistant Manager",
@@ -9,1127 +16,1332 @@ st.set_page_config(
     layout="wide"
 )
 
-BASE = "https://fantasy.premierleague.com/api"
-TIMEOUT = 20
+# ------------------------------------------------------------
+# SETTINGS
+# ------------------------------------------------------------
+
+FPL_API = "https://fantasy.premierleague.com/api/bootstrap-static/"
+FIXTURES_API = "https://fantasy.premierleague.com/api/fixtures/"
+
+BUDGET = 100.0
+
+# How many candidates we keep for optimisation.
+# Keeping this relatively small makes the app very fast.
+GK_CANDIDATES = 12
+DEF_CANDIDATES = 35
+MID_CANDIDATES = 40
+FWD_CANDIDATES = 25
+
+# Number of states retained during optimisation.
+BEAM_WIDTH = 6000
 
 
-# ============================================================
-# FPL DATA
-# ============================================================
+# ------------------------------------------------------------
+# LOAD FPL DATA
+# ------------------------------------------------------------
 
 @st.cache_data(ttl=900, show_spinner=False)
-def get_json(path):
+def load_fpl_data():
+
     response = requests.get(
-        f"{BASE}{path}",
-        timeout=TIMEOUT,
-        headers={"User-Agent": "Mozilla/5.0"}
+        FPL_API,
+        timeout=20,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
     )
+
     response.raise_for_status()
-    return response.json()
+
+    data = response.json()
+
+    fixtures_response = requests.get(
+        FIXTURES_API,
+        timeout=20,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
+
+    fixtures_response.raise_for_status()
+
+    fixtures = fixtures_response.json()
+
+    return data, fixtures
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def load_data():
+# ------------------------------------------------------------
+# BASIC HELPERS
+# ------------------------------------------------------------
 
-    bootstrap = get_json("/bootstrap-static/")
-    fixtures = get_json("/fixtures/")
+def safe_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except:
+        return default
+
+
+def safe_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except:
+        return default
+
+
+def position_name(position_id):
+
+    return {
+        1: "GK",
+        2: "DEF",
+        3: "MID",
+        4: "FWD"
+    }.get(position_id, "UNK")
+
+
+# ------------------------------------------------------------
+# FIXTURE DIFFICULTY
+# ------------------------------------------------------------
+
+def calculate_fixture_score(player_team, fixtures, current_gw):
+
+    """
+    Produces a simple attacking/defensive fixture score.
+
+    Lower fixture difficulty = better fixture.
+
+    We look ahead several Gameweeks rather than only one.
+    """
+
+    future = []
+
+    for fixture in fixtures:
+
+        if fixture.get("finished"):
+            continue
+
+        event = fixture.get("event")
+
+        if event is None:
+            continue
+
+        if event < current_gw:
+            continue
+
+        if event > current_gw + 5:
+            continue
+
+        home = fixture.get("team_h")
+        away = fixture.get("team_a")
+
+        if player_team not in (home, away):
+            continue
+
+        difficulty = (
+            fixture.get("team_h_difficulty", 3)
+            if player_team == home
+            else fixture.get("team_a_difficulty", 3)
+        )
+
+        future.append(difficulty)
+
+    if not future:
+        return 3.0
+
+    average = sum(future) / len(future)
+
+    # Convert FDR into a positive score.
+    # 1 = excellent fixture
+    # 5 = difficult fixture
+    return max(0.0, 6.0 - average)
+
+
+# ------------------------------------------------------------
+# PLAYER DATA
+# ------------------------------------------------------------
+
+def build_players(data, fixtures):
 
     teams = {
         team["id"]: team
-        for team in bootstrap["teams"]
+        for team in data["teams"]
     }
 
-    element_types = {
-        item["id"]: item
-        for item in bootstrap["element_types"]
-    }
-
-    finished_gameweeks = sum(
-        1 for event in bootstrap["events"]
-        if event.get("finished")
+    current_gw = safe_int(
+        data.get("events", [{}])[0].get("id", 1),
+        1
     )
+
+    # Find the current Gameweek.
+    for event in data.get("events", []):
+
+        if event.get("is_current"):
+            current_gw = event.get("id", current_gw)
 
     players = []
 
-    for player in bootstrap["elements"]:
+    for p in data.get("elements", []):
 
-        position = element_types[
-            player["element_type"]
-        ]["singular_name_short"]
+        position = position_name(p.get("element_type"))
 
-        team_name = teams[
-            player["team"]
-        ]["short_name"]
+        team_id = p.get("team")
+        team = teams.get(team_id, {})
 
-        try:
-            ep_next = float(player.get("ep_next") or 0)
-        except:
-            ep_next = 0.0
+        price = safe_float(p.get("now_cost")) / 10
 
-        try:
-            form = float(player.get("form") or 0)
-        except:
-            form = 0.0
+        total_points = safe_float(p.get("total_points"))
+        ppg = safe_float(p.get("points_per_game"))
+        form = safe_float(p.get("form"))
 
-        try:
-            ppg = float(
-                player.get("points_per_game") or 0
-            )
-        except:
-            ppg = 0.0
+        minutes = safe_float(p.get("minutes"))
 
-        chance = player.get(
-            "chance_of_playing_next_round"
+        starts = safe_float(p.get("starts"))
+
+        ownership = safe_float(p.get("selected_by_percent"))
+
+        ep_next = safe_float(p.get("ep_next"))
+        ep_this = safe_float(p.get("ep_this"))
+
+        chance = safe_float(
+            p.get("chance_of_playing_next_round"),
+            100
         )
 
         if chance is None:
             chance = 100
-        else:
-            chance = float(chance)
 
-        # FPL's own next-gameweek projection is our
-        # main projection figure.
-        if ep_next > 0:
-            projection = ep_next
+        if chance == 0:
+            availability = 0
         else:
-            # Fallback for players where FPL has not
-            # produced a useful projection yet.
+            availability = chance / 100
+
+        fixture_score = calculate_fixture_score(
+            team_id,
+            fixtures,
+            current_gw
+        )
+
+        # ----------------------------------------------------
+        # PROJECTED POINTS
+        # ----------------------------------------------------
+
+        # Current FPL projection if available.
+        official_projection = (
+            ep_next
+            if ep_next > 0
+            else ep_this
+        )
+
+        # Historical / current season points per game.
+        base_ppg = ppg
+
+        # Form.
+        form_score = form
+
+        # If there isn't enough current-season information,
+        # use points per game as the main starting point.
+        if base_ppg <= 0:
+            base_ppg = 2.5
+
+        # Combine the available information.
+        #
+        # Official FPL expected points gets the biggest weight
+        # when it is available.
+        if official_projection > 0:
+
             projection = (
-                ppg * 0.60
-                + form * 0.30
-                + (
-                    player["total_points"]
-                    / max(1, finished_gameweeks)
-                ) * 0.10
+                official_projection * 0.50
+                + base_ppg * 0.25
+                + form_score * 0.10
             )
+
+        else:
+
+            projection = (
+                base_ppg * 0.60
+                + form_score * 0.15
+            )
+
+        # Fixture adjustment.
+        #
+        # A good fixture should slightly increase the projection.
+        fixture_multiplier = 0.90 + (
+            fixture_score / 10
+        )
+
+        projection *= fixture_multiplier
+
+        # Availability.
+        projection *= (
+            0.70 + (0.30 * availability)
+        )
+
+        # Minutes/start probability.
+        #
+        # Players who regularly start are safer.
+        if minutes > 0:
+
+            start_rate = starts / max(
+                1,
+                minutes / 90
+            )
+
+            start_rate = min(
+                1.0,
+                max(0.0, start_rate)
+            )
+
+        else:
+
+            start_rate = 0.5
+
+        # Don't punish too harshly for limited sample sizes.
+        start_factor = 0.80 + (
+            0.20 * start_rate
+        )
+
+        projection *= start_factor
+
+        # ----------------------------------------------------
+        # VALUE SCORE
+        # ----------------------------------------------------
+
+        value = projection / max(
+            0.1,
+            price
+        )
+
+        # Slightly reward proven performers.
+        history_bonus = min(
+            1.0,
+            total_points / 1000
+        )
+
+        # Reliability.
+        reliability = (
+            availability * 0.5
+            + start_rate * 0.5
+        )
+
+        # Final optimisation score.
+        optimisation_score = (
+            projection * 0.70
+            + value * 0.20
+            + history_bonus * 0.05
+            + reliability * 0.05
+        )
 
         players.append({
 
-            "id": player["id"],
+            "id": p.get("id"),
 
-            "name":
-                f'{player["first_name"]} '
-                f'{player["second_name"]}',
+            "name": (
+                f"{p.get('first_name', '')} "
+                f"{p.get('second_name', '')}"
+            ).strip(),
 
-            "pos": position,
+            "short_name": p.get("web_name", "Unknown"),
 
-            "team_id":
-                player["team"],
+            "position": position,
 
-            "team":
-                team_name,
+            "team_id": team_id,
 
-            "price":
-                player["now_cost"] / 10,
+            "team": team.get(
+                "name",
+                "Unknown"
+            ),
 
-            "projection":
-                projection,
+            "price": price,
 
-            "ep_next":
-                ep_next,
+            "total_points": total_points,
 
-            "form":
-                form,
+            "ppg": ppg,
 
-            "ppg":
-                ppg,
+            "form": form,
 
-            "total_points":
-                player["total_points"],
+            "minutes": minutes,
 
-            "selected":
-                float(
-                    player.get(
-                        "selected_by_percent"
-                    ) or 0
-                ),
+            "starts": starts,
 
-            "chance":
-                chance,
+            "ownership": ownership,
 
-            "status":
-                player.get("status", "a"),
+            "projection": round(
+                max(0, projection),
+                2
+            ),
 
-            "news":
-                player.get("news") or "",
+            "value": round(
+                max(0, value),
+                3
+            ),
 
-            "transfers_in":
-                player.get(
-                    "transfers_in_event", 0
-                ),
+            "fixture_score": round(
+                fixture_score,
+                2
+            ),
 
-            "transfers_out":
-                player.get(
-                    "transfers_out_event", 0
-                )
+            "availability": availability,
+
+            "start_rate": start_rate,
+
+            "optimisation_score":
+                optimisation_score
         })
 
-    return (
-        bootstrap,
-        fixtures,
-        teams,
-        players
+    return players, current_gw
+
+
+# ------------------------------------------------------------
+# CANDIDATE FILTERING
+# ------------------------------------------------------------
+
+def get_candidates(players, position):
+
+    candidates = [
+        p for p in players
+        if p["position"] == position
+        and p["price"] > 0
+        and p["availability"] > 0
+    ]
+
+    candidates.sort(
+        key=lambda x: x["optimisation_score"],
+        reverse=True
     )
 
+    limits = {
+        "GK": GK_CANDIDATES,
+        "DEF": DEF_CANDIDATES,
+        "MID": MID_CANDIDATES,
+        "FWD": FWD_CANDIDATES
+    }
 
-# ============================================================
-# PLAYER ELIGIBILITY
-# ============================================================
-
-def eligible(player):
-
-    return (
-        player["status"] in {"a", "d"}
-        and player["chance"] > 0
-        and player["price"] > 0
-    )
+    return candidates[:limits[position]]
 
 
-def player_score(player):
+# ------------------------------------------------------------
+# FAST BEAM SEARCH
+# ------------------------------------------------------------
 
-    return player["projection"]
-
-
-# ============================================================
-# FAST £100M DREAM TEAM OPTIMISER
-# ============================================================
-
-def fast_best_squad(players, budget=100.0):
+def optimise_squad(players):
 
     """
-    Finds a very strong legal FPL 15-player squad
-    without brute-forcing every possible squad.
+    Finds a strong 15-man squad quickly.
 
-    Rules:
+    Required:
+        2 GK
+        5 DEF
+        5 MID
+        3 FWD
 
-    2 GKs
-    5 DEFs
-    5 MIDs
-    3 FWDs
-    £100m maximum
-    Maximum 3 players from one club
-
-    Uses a beam-search optimiser so it remains fast.
+    Constraints:
+        £100m
+        max 3 players per club
     """
 
-    quotas = {
-        "GKP": 2,
-        "DEF": 5,
-        "MID": 5,
-        "FWD": 3
-    }
-
-    # Only keep the strongest projected players at
-    # each position. This dramatically reduces the
-    # search space.
-    candidate_limits = {
-        "GKP": 12,
-        "DEF": 25,
-        "MID": 30,
-        "FWD": 22
-    }
-
-    players_by_position = defaultdict(list)
-
-    for player in players:
-
-        if eligible(player):
-
-            players_by_position[
-                player["pos"]
-            ].append(player)
-
-    for position in quotas:
-
-        players_by_position[position].sort(
-            key=lambda p: (
-                p["projection"],
-                p["total_points"]
-            ),
-            reverse=True
-        )
-
-        players_by_position[position] = (
-            players_by_position[position]
-            [:candidate_limits[position]]
-        )
-
-    # Convert £m to tenths of a million.
-    budget_t = int(
-        round(budget * 10)
-    )
-
-    # Clubs used by the players.
-    clubs = sorted(
-        {
-            p["team_id"]
-            for p in players
-        }
-    )
-
-    club_index = {
-        club: index
-        for index, club in enumerate(clubs)
-    }
-
-    # State:
-    #
-    # spent
-    # position counts
-    # club counts
-    # player IDs
-    #
-    # value = projected points
-
-    states = {
-        (
-            0,
-            (0, 0, 0, 0),
-            (0,) * len(clubs),
-            ()
-        ): 0.0
-    }
-
-    # This is the important part:
-    # instead of checking millions of complete
-    # squads, we keep only the strongest partial
-    # squads after each player selection.
-
-    beam_size = 6000
-
-    selection_order = [
-        ("GKP", 2),
+    positions = [
+        ("GK", 2),
         ("DEF", 5),
         ("MID", 5),
         ("FWD", 3)
     ]
 
-    for position, quantity in selection_order:
-
-        for _ in range(quantity):
-
-            new_states = {}
-
-            pool = players_by_position[position]
-
-            for (
-                spent,
-                position_counts,
-                club_counts,
-                selected_ids
-            ), current_points in states.items():
-
-                already_selected = set(
-                    selected_ids
-                )
-
-                for player in pool:
-
-                    if player["id"] in already_selected:
-                        continue
-
-                    cost = int(
-                        round(
-                            player["price"] * 10
-                        )
-                    )
-
-                    new_spent = (
-                        spent + cost
-                    )
-
-                    if new_spent > budget_t:
-                        continue
-
-                    club_id = player["team_id"]
-
-                    club_number = (
-                        club_index[club_id]
-                    )
-
-                    # Maximum 3 players from
-                    # one Premier League club.
-                    if (
-                        club_counts[
-                            club_number
-                        ] >= 3
-                    ):
-                        continue
-
-                    new_position_counts = list(
-                        position_counts
-                    )
-
-                    position_number = [
-                        "GKP",
-                        "DEF",
-                        "MID",
-                        "FWD"
-                    ].index(position)
-
-                    new_position_counts[
-                        position_number
-                    ] += 1
-
-                    new_club_counts = list(
-                        club_counts
-                    )
-
-                    new_club_counts[
-                        club_number
-                    ] += 1
-
-                    state_key = (
-                        new_spent,
-                        tuple(
-                            new_position_counts
-                        ),
-                        tuple(
-                            new_club_counts
-                        )
-                    )
-
-                    new_points = (
-                        current_points
-                        + player_score(player)
-                    )
-
-                    previous = new_states.get(
-                        state_key
-                    )
-
-                    if (
-                        previous is None
-                        or new_points > previous[0]
-                    ):
-
-                        new_states[
-                            state_key
-                        ] = (
-                            new_points,
-                            selected_ids
-                            + (player["id"],)
-                        )
-
-            # Keep only the strongest partial squads.
-            ranked = sorted(
-                new_states.items(),
-                key=lambda item:
-                    item[1][0],
-                reverse=True
-            )[:beam_size]
-
-            states = {}
-
-            for (
-                spent,
-                position_counts,
-                club_counts
-            ), (
-                points,
-                selected_ids
-            ) in ranked:
-
-                states[
-                    (
-                        spent,
-                        position_counts,
-                        club_counts,
-                        selected_ids
-                    )
-                ] = points
-
-            if not states:
-
-                return [], 0.0, 0.0
-
-    # Best final squad.
-    best_state = max(
-        states.items(),
-        key=lambda item: item[1]
-    )
-
-    best_key, best_points = best_state
-
-    (
-        spent,
-        position_counts,
-        club_counts,
-        selected_ids
-    ) = best_key
-
-    player_lookup = {
-        player["id"]: player
-        for player in players
+    candidates_by_position = {
+        pos: get_candidates(players, pos)
+        for pos, _ in positions
     }
 
-    squad = [
-        player_lookup[player_id]
-        for player_id in selected_ids
+    # State:
+    # (
+    #   selected_tuple,
+    #   cost,
+    #   score,
+    #   club_counts
+    # )
+
+    states = [
+        (
+            tuple(),
+            0.0,
+            0.0,
+            {}
+        )
     ]
 
-    return (
-        squad,
-        best_points,
-        spent / 10
+    for position, required in positions:
+
+        candidates = candidates_by_position[position]
+
+        # Keep candidates affordable in isolation.
+        candidates = [
+            p for p in candidates
+            if p["price"] <= BUDGET
+        ]
+
+        new_states = []
+
+        # For each current state, add combinations
+        # of the required players for this position.
+        #
+        # Candidate lists are intentionally limited.
+        for state in states:
+
+            selected, cost, score, clubs = state
+
+            for combo in itertools.combinations(
+                candidates,
+                required
+            ):
+
+                combo_cost = sum(
+                    p["price"]
+                    for p in combo
+                )
+
+                new_cost = cost + combo_cost
+
+                if new_cost > BUDGET:
+                    continue
+
+                new_clubs = clubs.copy()
+
+                valid = True
+
+                for p in combo:
+
+                    club = p["team_id"]
+
+                    new_clubs[club] = (
+                        new_clubs.get(club, 0) + 1
+                    )
+
+                    if new_clubs[club] > 3:
+                        valid = False
+                        break
+
+                if not valid:
+                    continue
+
+                combo_score = sum(
+                    p["optimisation_score"]
+                    for p in combo
+                )
+
+                new_states.append(
+                    (
+                        selected + combo,
+                        new_cost,
+                        score + combo_score,
+                        new_clubs
+                    )
+                )
+
+        # Keep only the best states.
+        new_states.sort(
+            key=lambda x: x[2],
+            reverse=True
+        )
+
+        states = new_states[:BEAM_WIDTH]
+
+        if not states:
+            return []
+
+    # Best state.
+    states.sort(
+        key=lambda x: x[2],
+        reverse=True
     )
 
+    return list(states[0][0])
 
-# ============================================================
-# LOAD LIVE DATA
-# ============================================================
+
+# ------------------------------------------------------------
+# STARTING XI OPTIMISATION
+# ------------------------------------------------------------
+
+def best_starting_xi(squad):
+
+    """
+    Find the highest projected starting XI.
+
+    Valid FPL formations require:
+
+        1 GK
+        minimum 3 DEF
+        minimum 2 MID
+        minimum 1 FWD
+    """
+
+    gks = [
+        p for p in squad
+        if p["position"] == "GK"
+    ]
+
+    defs = [
+        p for p in squad
+        if p["position"] == "DEF"
+    ]
+
+    mids = [
+        p for p in squad
+        if p["position"] == "MID"
+    ]
+
+    fwds = [
+        p for p in squad
+        if p["position"] == "FWD"
+    ]
+
+    best = None
+
+    formations = []
+
+    for defenders in range(3, 6):
+
+        for midfielders in range(2, 6):
+
+            forwards = 10 - defenders - midfielders
+
+            if forwards < 1:
+                continue
+
+            if forwards > 3:
+                continue
+
+            if defenders > len(defs):
+                continue
+
+            if midfielders > len(mids):
+                continue
+
+            if forwards > len(fwds):
+                continue
+
+            formations.append(
+                (
+                    defenders,
+                    midfielders,
+                    forwards
+                )
+            )
+
+    for d_count, m_count, f_count in formations:
+
+        for gk in gks:
+
+            for d_combo in itertools.combinations(
+                defs,
+                d_count
+            ):
+
+                for m_combo in itertools.combinations(
+                    mids,
+                    m_count
+                ):
+
+                    for f_combo in itertools.combinations(
+                        fwds,
+                        f_count
+                    ):
+
+                        xi = (
+                            [gk]
+                            + list(d_combo)
+                            + list(m_combo)
+                            + list(f_combo)
+                        )
+
+                        score = sum(
+                            p["projection"]
+                            for p in xi
+                        )
+
+                        if (
+                            best is None
+                            or score > best["score"]
+                        ):
+
+                            best = {
+                                "players": xi,
+                                "score": score,
+                                "formation": (
+                                    f"{d_count}-"
+                                    f"{m_count}-"
+                                    f"{f_count}"
+                                )
+                            }
+
+    return best
+
+
+# ------------------------------------------------------------
+# CAPTAIN
+# ------------------------------------------------------------
+
+def choose_captain(xi):
+
+    sorted_players = sorted(
+        xi,
+        key=lambda p: (
+            p["projection"],
+            p["form"],
+            p["fixture_score"]
+        ),
+        reverse=True
+    )
+
+    if not sorted_players:
+        return None, None
+
+    captain = sorted_players[0]
+
+    vice = (
+        sorted_players[1]
+        if len(sorted_players) > 1
+        else None
+    )
+
+    return captain, vice
+
+
+# ------------------------------------------------------------
+# BENCH
+# ------------------------------------------------------------
+
+def build_bench(squad, starting_xi):
+
+    starter_ids = {
+        p["id"]
+        for p in starting_xi
+    }
+
+    bench = [
+        p for p in squad
+        if p["id"] not in starter_ids
+    ]
+
+    # Put strongest bench options first,
+    # but maintain a useful positional order.
+    bench.sort(
+        key=lambda p: (
+            p["projection"],
+            p["start_rate"],
+            p["form"]
+        ),
+        reverse=True
+    )
+
+    return bench
+
+
+# ------------------------------------------------------------
+# DISPLAY TABLE
+# ------------------------------------------------------------
+
+def player_dataframe(players):
+
+    rows = []
+
+    for p in players:
+
+        rows.append({
+
+            "Player": p["short_name"],
+
+            "Club": p["team"],
+
+            "Pos": p["position"],
+
+            "Price": f"£{p['price']:.1f}m",
+
+            "Projected": round(
+                p["projection"],
+                1
+            ),
+
+            "Form": round(
+                p["form"],
+                1
+            ),
+
+            "PPG": round(
+                p["ppg"],
+                1
+            ),
+
+            "Fixture": round(
+                p["fixture_score"],
+                1
+            ),
+
+            "Value": round(
+                p["value"],
+                2
+            )
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------
+# TRANSFER ENGINE
+# ------------------------------------------------------------
+
+def recommend_transfers(
+    current_squad,
+    players,
+    free_transfers=1
+):
+
+    if not current_squad:
+        return []
+
+    recommendations = []
+
+    # Candidate pool.
+    candidates_by_position = {
+
+        "GK": get_candidates(players, "GK"),
+
+        "DEF": get_candidates(players, "DEF"),
+
+        "MID": get_candidates(players, "MID"),
+
+        "FWD": get_candidates(players, "FWD")
+    }
+
+    current_ids = {
+        p["id"]
+        for p in current_squad
+    }
+
+    current_clubs = Counter(
+        p["team_id"]
+        for p in current_squad
+    )
+
+    for outgoing in current_squad:
+
+        candidates = candidates_by_position[
+            outgoing["position"]
+        ]
+
+        for incoming in candidates:
+
+            if incoming["id"] in current_ids:
+                continue
+
+            # Buying the incoming player means
+            # removing the outgoing player first.
+            new_club_count = (
+                current_clubs[incoming["team_id"]]
+                - (
+                    1
+                    if incoming["team_id"]
+                    == outgoing["team_id"]
+                    else 0
+                )
+                + 1
+            )
+
+            if new_club_count > 3:
+                continue
+
+            # Projected improvement.
+            improvement = (
+                incoming["projection"]
+                - outgoing["projection"]
+            )
+
+            # Cost of transfer.
+            hit_cost = 0
+
+            if free_transfers <= 0:
+                hit_cost = 4
+
+            net_gain = improvement - hit_cost
+
+            # Only recommend transfers with a
+            # meaningful projected benefit.
+            if net_gain <= 0.5:
+                continue
+
+            recommendations.append({
+
+                "out": outgoing,
+
+                "in": incoming,
+
+                "improvement": improvement,
+
+                "hit_cost": hit_cost,
+
+                "net_gain": net_gain
+            })
+
+    recommendations.sort(
+        key=lambda x: x["net_gain"],
+        reverse=True
+    )
+
+    return recommendations[:10]
+
+
+# ------------------------------------------------------------
+# HEADER
+# ------------------------------------------------------------
+
+st.title("⚽ FPL Assistant Manager")
+
+st.caption(
+    "Fast squad optimisation • Starting XI • Transfers • Captain"
+)
+
+
+# ------------------------------------------------------------
+# LOAD
+# ------------------------------------------------------------
 
 try:
 
-    (
-        bootstrap,
-        fixtures,
-        teams,
-        players
-    ) = load_data()
+    with st.spinner("Loading the latest FPL data..."):
 
-except Exception as error:
+        data, fixtures = load_fpl_data()
+
+        players, current_gw = build_players(
+            data,
+            fixtures
+        )
+
+except Exception as e:
 
     st.error(
-        "I couldn't load the live FPL data."
+        "Could not load the official FPL data."
     )
 
-    st.code(str(error))
+    st.code(str(e))
 
     st.stop()
 
 
-# ============================================================
+# ------------------------------------------------------------
 # GAMEWEEK STATUS
-# ============================================================
+# ------------------------------------------------------------
 
-current_gameweek = next(
-    (
-        event
-        for event in bootstrap["events"]
-        if event.get("is_current")
-    ),
-    None
-)
+current_event = None
 
-next_gameweek = next(
-    (
-        event
-        for event in bootstrap["events"]
-        if event.get("is_next")
-    ),
-    None
-)
+for event in data.get("events", []):
 
-finished_gameweeks = sum(
-    1
-    for event in bootstrap["events"]
-    if event.get("finished")
-)
+    if event.get("is_current"):
 
+        current_event = event
+        break
 
-# ============================================================
-# HEADER
-# ============================================================
+if current_event:
 
-st.title(
-    "⚽ FPL Assistant Manager"
-)
+    gw_number = current_event.get(
+        "id",
+        current_gw
+    )
 
-if current_gameweek:
-
-    status_text = (
-        f"Gameweek "
-        f"{current_gameweek['id']}"
-        f" active"
+    gw_name = current_event.get(
+        "name",
+        f"Gameweek {gw_number}"
     )
 
 else:
 
-    status_text = "FPL data loaded"
+    gw_number = current_gw
+    gw_name = f"Gameweek {gw_number}"
 
-if next_gameweek:
 
-    status_text += (
-        f" | Planning for GW "
-        f"{next_gameweek['id']}"
-    )
-
-st.caption(
-    status_text
-    + f" | {len(players)} players loaded"
-    + f" | {finished_gameweeks} GW(s) completed"
+st.info(
+    f"📅 {gw_name} • "
+    f"Using current official FPL data"
 )
 
 
-# ============================================================
-# REFRESH BUTTON
-# ============================================================
-
-if st.button(
-    "🔄 Refresh FPL data"
-):
-
-    st.cache_data.clear()
-
-    st.rerun()
-
-
-# ============================================================
+# ------------------------------------------------------------
 # TABS
-# ============================================================
+# ------------------------------------------------------------
 
-(
-    planner_tab,
-    dream_tab,
-    transfer_tab,
-    scoring_tab
-) = st.tabs(
+tab1, tab2, tab3, tab4 = st.tabs(
     [
-        "📋 Player Planner",
-        "💰 £100m Dream Team",
+        "🏆 Best Team",
+        "⚽ Starting XI",
         "🔄 Transfers",
-        "📚 FPL Scoring"
+        "📊 Player Data"
     ]
 )
 
 
 # ============================================================
-# PLAYER PLANNER
+# BEST £100M TEAM
 # ============================================================
 
-with planner_tab:
+with tab1:
 
-    st.subheader(
-        "Player Planner"
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        position_filter = st.selectbox(
-            "Position",
-            [
-                "All",
-                "GKP",
-                "DEF",
-                "MID",
-                "FWD"
-            ]
-        )
-
-    with col2:
-
-        maximum_price = st.number_input(
-            "Maximum price (£m)",
-            min_value=3.5,
-            max_value=15.0,
-            value=15.0,
-            step=0.1
-        )
-
-    with col3:
-
-        minimum_projection = st.number_input(
-            "Minimum projected points",
-            min_value=0.0,
-            max_value=20.0,
-            value=0.0,
-            step=0.5
-        )
-
-    filtered_players = []
-
-    for player in players:
-
-        if (
-            position_filter != "All"
-            and player["pos"]
-            != position_filter
-        ):
-            continue
-
-        if (
-            player["price"]
-            > maximum_price
-        ):
-            continue
-
-        if (
-            player["projection"]
-            < minimum_projection
-        ):
-            continue
-
-        filtered_players.append(
-            player
-        )
-
-    filtered_players.sort(
-        key=lambda p:
-            p["projection"],
-        reverse=True
-    )
-
-    rows = []
-
-    for player in filtered_players[:100]:
-
-        rows.append(
-            {
-                "Player":
-                    player["name"],
-
-                "Pos":
-                    player["pos"],
-
-                "Club":
-                    player["team"],
-
-                "Price":
-                    f"£{player['price']:.1f}m",
-
-                "Projected":
-                    round(
-                        player["projection"],
-                        1
-                    ),
-
-                "PPG":
-                    round(
-                        player["ppg"],
-                        1
-                    ),
-
-                "Form":
-                    round(
-                        player["form"],
-                        1
-                    ),
-
-                "Total":
-                    player["total_points"],
-
-                "Start chance":
-                    f"{player['chance']:.0f}%"
-            }
-        )
-
-    st.dataframe(
-        rows,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# ============================================================
-# DREAM TEAM
-# ============================================================
-
-with dream_tab:
-
-    st.subheader(
-        "💰 £100m Best Possible Team"
-    )
+    st.header("💰 Best £100m Team")
 
     st.write(
-        "This searches for the strongest projected "
-        "15-player squad without brute-forcing "
-        "every possible combination."
+        "This searches for a high-scoring 15-player squad "
+        "within the official FPL squad rules."
     )
 
-    st.info(
-        "Rules: £100m maximum • "
-        "2 GKs • 5 DEFs • 5 MIDs • 3 FWDs • "
-        "maximum 3 players from one club."
-    )
-
-    if st.button(
-        "🚀 Find best £100m squad",
-        type="primary"
+    with st.spinner(
+        "Finding the best £100m squad..."
     ):
 
-        with st.spinner(
-            "Finding the best £100m squad..."
-        ):
+        best_squad = optimise_squad(players)
 
-            (
-                dream_squad,
-                total_projection,
-                total_cost
-            ) = fast_best_squad(
-                players,
-                100.0
-            )
+    if not best_squad:
 
-        if not dream_squad:
-
-            st.error(
-                "No legal £100m squad was found."
-            )
-
-        else:
-
-            st.session_state[
-                "dream_squad"
-            ] = dream_squad
-
-            st.session_state[
-                "dream_total"
-            ] = total_projection
-
-            st.session_state[
-                "dream_cost"
-            ] = total_cost
-
-    if (
-        "dream_squad"
-        in st.session_state
-    ):
-
-        dream_squad = (
-            st.session_state[
-                "dream_squad"
-            ]
-        )
-
-        total_projection = (
-            st.session_state[
-                "dream_total"
-            ]
-        )
-
-        total_cost = (
-            st.session_state[
-                "dream_cost"
-            ]
-        )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            st.metric(
-                "Projected squad points",
-                f"{total_projection:.1f}"
-            )
-
-        with col2:
-
-            st.metric(
-                "Squad cost",
-                f"£{total_cost:.1f}m"
-            )
-
-        rows = []
-
-        position_order = [
-            "GKP",
-            "DEF",
-            "MID",
-            "FWD"
-        ]
-
-        dream_squad.sort(
-            key=lambda player:
-                position_order.index(
-                    player["pos"]
-                )
-        )
-
-        for player in dream_squad:
-
-            rows.append(
-                {
-                    "Player":
-                        player["name"],
-
-                    "Pos":
-                        player["pos"],
-
-                    "Club":
-                        player["team"],
-
-                    "Price":
-                        f"£{player['price']:.1f}m",
-
-                    "Projected":
-                        round(
-                            player["projection"],
-                            1
-                        ),
-
-                    "Total":
-                        player["total_points"]
-                }
-            )
-
-        st.dataframe(
-            rows,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        club_counts = defaultdict(int)
-
-        for player in dream_squad:
-
-            club_counts[
-                player["team"]
-            ] += 1
-
-        st.caption(
-            "Club limits: "
-            + " • ".join(
-                f"{club} {count}"
-                for club, count
-                in sorted(
-                    club_counts.items()
-                )
-            )
-        )
-
-        st.success(
-            "Done — the fast optimiser has "
-            "finished searching the squad."
+        st.error(
+            "I couldn't find a valid squad. "
+            "Try refreshing the page."
         )
 
     else:
 
-        st.warning(
-            "Press the button above to "
-            "build the £100m squad."
+        total_cost = sum(
+            p["price"]
+            for p in best_squad
         )
+
+        total_projection = sum(
+            p["projection"]
+            for p in best_squad
+        )
+
+        remaining = BUDGET - total_cost
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Squad Cost",
+            f"£{total_cost:.1f}m"
+        )
+
+        col2.metric(
+            "Money Remaining",
+            f"£{remaining:.1f}m"
+        )
+
+        col3.metric(
+            "Projected Points",
+            f"{total_projection:.1f}"
+        )
+
+        st.success(
+            "This is the recommended 15-player squad."
+        )
+
+        df = player_dataframe(best_squad)
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # Position summaries.
+
+        for position, label in [
+            ("GK", "🧤 Goalkeepers"),
+            ("DEF", "🛡️ Defenders"),
+            ("MID", "🎯 Midfielders"),
+            ("FWD", "⚡ Forwards")
+        ]:
+
+            st.subheader(label)
+
+            position_players = [
+                p for p in best_squad
+                if p["position"] == position
+            ]
+
+            for p in position_players:
+
+                st.write(
+                    f"**{p['short_name']}** "
+                    f"({p['team']}) — "
+                    f"£{p['price']:.1f}m — "
+                    f"projected **{p['projection']:.1f}**"
+                )
+
+
+# ============================================================
+# STARTING XI
+# ============================================================
+
+with tab2:
+
+    st.header("⚽ Best Starting XI")
+
+    if not best_squad:
+
+        st.warning(
+            "Build the £100m squad first."
+        )
+
+    else:
+
+        with st.spinner(
+            "Finding the best starting XI..."
+        ):
+
+            best_xi = best_starting_xi(
+                best_squad
+            )
+
+        if not best_xi:
+
+            st.error(
+                "Could not calculate a starting XI."
+            )
+
+        else:
+
+            captain, vice = choose_captain(
+                best_xi["players"]
+            )
+
+            bench = build_bench(
+                best_squad,
+                best_xi["players"]
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Formation",
+                best_xi["formation"]
+            )
+
+            col2.metric(
+                "Projected XI",
+                f"{best_xi['score']:.1f}"
+            )
+
+            if captain:
+
+                col3.metric(
+                    "Captain",
+                    captain["short_name"]
+                )
+
+            st.subheader(
+                f"⭐ Recommended {best_xi['formation']}"
+            )
+
+            xi_df = player_dataframe(
+                best_xi["players"]
+            )
+
+            st.dataframe(
+                xi_df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            if captain:
+
+                st.success(
+                    f"🧢 Captain: **{captain['short_name']}** "
+                    f"({captain['projection']:.1f} projected)"
+                )
+
+            if vice:
+
+                st.info(
+                    f"🥈 Vice-Captain: "
+                    f"**{vice['short_name']}** "
+                    f"({vice['projection']:.1f} projected)"
+                )
+
+            st.subheader("🪑 Bench")
+
+            for index, player in enumerate(
+                bench,
+                start=1
+            ):
+
+                st.write(
+                    f"**{index}. {player['short_name']}** "
+                    f"({player['position']}) — "
+                    f"{player['projection']:.1f} projected"
+                )
 
 
 # ============================================================
 # TRANSFERS
 # ============================================================
 
-with transfer_tab:
+with tab3:
 
-    st.subheader(
-        "🔄 Transfer Planner"
-    )
+    st.header("🔄 Transfer Recommendations")
 
     st.write(
-        "Enter your FPL Team ID to load your "
-        "FPL manager information."
+        "The transfer engine looks for upgrades based on "
+        "projected points, fixtures, form and value."
     )
 
-    team_id = st.number_input(
-        "FPL Team ID",
-        min_value=1,
+    st.caption(
+        "If you have used all your free transfers, "
+        "the calculation can account for the normal "
+        "-4 point transfer cost."
+    )
+
+    # We don't know the user's actual FPL squad unless
+    # they add it manually.
+    st.info(
+        "To make personalised transfer recommendations, "
+        "enter the players currently in your squad below."
+    )
+
+    names = [
+        p["short_name"]
+        for p in players
+    ]
+
+    selected_names = st.multiselect(
+        "Your current 15 players",
+        names,
+        max_selections=15
+    )
+
+    free_transfers = st.number_input(
+        "Free transfers available",
+        min_value=0,
+        max_value=5,
         value=1,
         step=1
     )
 
-    if st.button(
-        "Analyse my team"
-    ):
+    if selected_names:
 
-        try:
+        current_squad = [
+            p for p in players
+            if p["short_name"]
+            in selected_names
+        ]
 
-            entry = get_json(
-                f"/entry/{team_id}/"
+        if len(current_squad) < 15:
+
+            st.warning(
+                f"You've selected {len(current_squad)} "
+                f"players. Select all 15 for the most accurate "
+                f"recommendations."
             )
 
-            history = get_json(
-                f"/entry/{team_id}/history/"
-            )
+        recommendations = recommend_transfers(
+            current_squad,
+            players,
+            free_transfers
+        )
 
-            st.session_state[
-                "entry"
-            ] = entry
-
-            st.session_state[
-                "history"
-            ] = history
+        if not recommendations:
 
             st.success(
-                "FPL team loaded."
+                "No obvious profitable transfer found "
+                "from the current data."
             )
 
-        except Exception as error:
+        else:
 
-            st.error(
-                "Couldn't find that FPL team ID."
+            st.subheader(
+                "Best potential transfers"
             )
 
-            st.code(
-                str(error)
-            )
+            for rec in recommendations:
 
-    if (
-        "entry"
-        in st.session_state
-    ):
+                outgoing = rec["out"]
+                incoming = rec["in"]
 
-        entry = (
-            st.session_state[
-                "entry"
-            ]
-        )
+                hit_text = (
+                    "FREE"
+                    if rec["hit_cost"] == 0
+                    else "-4"
+                )
 
-        st.write(
-            f"**{entry.get('name', 'Your team')}**"
-        )
+                st.markdown(
+                    f"""
+### 🔄 {outgoing['short_name']} → {incoming['short_name']}
 
-        rank = entry.get(
-            "summary_overall_rank"
-        )
+**Sell:** {outgoing['team']} • £{outgoing['price']:.1f}m  
+**Buy:** {incoming['team']} • £{incoming['price']:.1f}m
 
-        if rank:
+Projected improvement:
+**+{rec['improvement']:.1f} points**
 
-            st.write(
-                f"Overall rank: "
-                f"{rank:,}"
-            )
+Transfer cost:
+**{hit_text}**
 
-        st.info(
-            "Transfer logic: the assistant "
-            "should consider the expected points "
-            "gain from a move, the player's price, "
-            "fixture outlook and whether selling an "
-            "expensive player frees money for a "
-            "better combination elsewhere."
-        )
-
-        st.write(
-            "A -4 hit should only be recommended "
-            "when the expected gain from the move "
-            "is strong enough to justify losing "
-            "four points."
-        )
+Estimated net benefit:
+**+{rec['net_gain']:.1f} points**
+"""
+                )
 
 
 # ============================================================
-# FPL SCORING
+# PLAYER DATA
 # ============================================================
 
-with scoring_tab:
+with tab4:
 
-    st.subheader(
-        "📚 FPL Scoring"
-    )
+    st.header("📊 Player Data")
 
     st.write(
-        "The current model follows the current "
-        "FPL scoring system."
+        "Players are ranked using current FPL information "
+        "including projected points, form, previous/current "
+        "points-per-game, fixtures, availability and value."
     )
 
-    scoring = [
-
-        (
-            "Playing up to 60 minutes",
-            "+1"
-        ),
-
-        (
-            "Playing 60 minutes or more",
-            "+2"
-        ),
-
-        (
-            "Goal — goalkeeper",
-            "+10"
-        ),
-
-        (
-            "Goal — defender",
-            "+6"
-        ),
-
-        (
-            "Goal — midfielder",
-            "+5"
-        ),
-
-        (
-            "Goal — forward",
-            "+4"
-        ),
-
-        (
-            "Assist",
-            "+3"
-        ),
-
-        (
-            "Clean sheet — goalkeeper/defender",
-            "+4"
-        ),
-
-        (
-            "Clean sheet — midfielder",
-            "+1"
-        ),
-
-        (
-            "Every 3 goalkeeper saves",
-            "+1"
-        ),
-
-        (
-            "Penalty save",
-            "+5"
-        ),
-
-        (
-            "Defensive contributions — defender",
-            "+2"
-        ),
-
-        (
-            "Defensive contributions — midfielder/forward",
-            "+2"
-        ),
-
-        (
-            "Penalty miss",
-            "-2"
-        ),
-
-        (
-            "Bonus",
-            "+1 to +3"
-        ),
-
-        (
-            "Every 2 goals conceded — GK/DEF",
-            "-1"
-        ),
-
-        (
-            "Yellow card",
-            "-1"
-        ),
-
-        (
-            "Red card",
-            "-3"
-        ),
-
-        (
-            "Own goal",
-            "-2"
-        )
-    ]
-
-    st.table(
-        {
-            "Event":
-                [item[0] for item in scoring],
-
-            "Points":
-                [item[1] for item in scoring]
-        }
+    search = st.text_input(
+        "Search for a player"
     )
 
-    st.caption(
-        "The 60-minute appearance threshold, "
-        "defensive-contribution points and "
-        "Bonus Points System are included in "
-        "the current FPL rules."
+    filtered = players
+
+    if search:
+
+        filtered = [
+            p for p in players
+            if search.lower()
+            in p["name"].lower()
+            or search.lower()
+            in p["team"].lower()
+        ]
+
+    filtered.sort(
+        key=lambda p:
+        p["optimisation_score"],
+        reverse=True
     )
+
+    st.dataframe(
+        player_dataframe(filtered[:100]),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ------------------------------------------------------------
+# FOOTER
+# ------------------------------------------------------------
+
+st.divider()
+
+st.caption(
+    "FPL Assistant Manager uses official Fantasy Premier League "
+    "data. Projections are estimates, not guarantees."
+)
+
+st.caption(
+    "Data refreshes automatically and is cached temporarily "
+    "to keep the app fast."
+)
