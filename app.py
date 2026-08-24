@@ -67,7 +67,7 @@ def get_live_gw(gameweek):
     return {el["id"]: el["stats"]["total_points"] for el in data.get("elements", [])}
 
 # ============================================================
-# PURE HELPER FUNCTIONS
+# PURE HELPER & OPTA FORM FUNCTIONS
 # ============================================================
 def num(value, default=0.0):
     try:
@@ -98,9 +98,12 @@ def calc_blended_score(player):
     availability = availability_factor(player) * 5
     dgw_bonus = 8 if player["next_gw_fixtures"] >= 2 else 0
     bgw_penalty = 20 if player["next_gw_fixtures"] == 0 else 0
+
+    # Underlying Opta threat / chance involvement bonus
+    opta_attacking = min(player["xgi90"] * 10, 12)
     defensive_component = 0
     if player["position"] in ("GK", "DEF") and player["xgc90"] > 0:
-        defensive_component = max(0, (1.3 - player["xgc90"]) * 4)
+        defensive_component = max(0, (1.3 - player["xgc90"]) * 5)
 
     return round(
         actual_points
@@ -111,6 +114,7 @@ def calc_blended_score(player):
         + availability
         + dgw_bonus
         - bgw_penalty
+        + opta_attacking
         + defensive_component,
         2
     )
@@ -119,7 +123,7 @@ def calc_multi_gw_projection(player, fixture_map, weeks=HIT_PROJECTION_WEEKS):
     games = sorted(fixture_map.get(player["team_id"], []), key=lambda x: x["gw"])[:weeks]
     if not games:
         return player["ep_next"]
-    base_per_fixture = (player["ep_next"] * 0.6) + (player["ppg"] * 0.4)
+    base_per_fixture = (player["ep_next"] * 0.5) + (player["ppg"] * 0.3) + (player["xgi90"] * 2.5)
     total = 0.0
     for g in games:
         difficulty_multiplier = 1.0 + ((3 - g["difficulty"]) * 0.08)
@@ -157,7 +161,7 @@ def fixture_text(fixture_map, team_names, team_id, number=5):
 # ============================================================
 # CACHED DATA LOADER
 # ============================================================
-@st.cache_data(ttl=900, show_spinner="Loading FPL data...")
+@st.cache_data(ttl=900, show_spinner="Loading FPL & Opta data...")
 def load_fpl_data():
     r = requests.get(f"{API}/bootstrap-static/", headers=HEADERS, timeout=15)
     r.raise_for_status()
@@ -652,7 +656,7 @@ def chip_recommendation(squad, history):
 st.title("⚽ FPL Assistant Manager")
 st.caption(
     f"GW{current_gw} | Planning for GW{next_gw} | "
-    "Actual FPL points + form + fixtures + expected points"
+    "Opta xGI/xGC + Points + Fixture Projections"
 )
 
 # ============================================================
@@ -735,7 +739,7 @@ with tabs[0]:
                 "FPL Points": p["points"],
                 "PPG": round(p["ppg"], 1),
                 "Form": round(p["form"], 1),
-                "Minutes": p["minutes"],
+                "Opta xGI/90": round(p["xgi90"], 2),
                 "Next GW": p["next_gw_fixtures"],
                 "FDR": round(p["fdr"], 1),
                 "Price Trend": price_momentum_flag(p),
@@ -802,8 +806,8 @@ with tabs[1]:
                 c3.metric(f"{HIT_PROJECTION_WEEKS}GW Projected Gain", f"+{s['projected_gain']:.1f}")
                 c4.metric("Transfer", hit_text)
 
-                st.write(f"**OUT:** {outgoing['team']} £{outgoing['price']:.1f}m")
-                st.write(f"**IN:** {incoming['team']} £{incoming['price']:.1f}m")
+                st.write(f"**OUT:** {outgoing['team']} £{outgoing['price']:.1f}m (xGI/90: {outgoing['xgi90']:.2f})")
+                st.write(f"**IN:** {incoming['team']} £{incoming['price']:.1f}m (xGI/90: {incoming['xgi90']:.2f})")
                 st.write(f"💰 {money_text} | Fixtures: {incoming['fixtures']}")
                 st.write(f"Price trend (IN): {price_momentum_flag(incoming)}")
 
@@ -860,7 +864,7 @@ with tabs[2]:
                 "FPL Points": p["points"],
                 "PPG": round(p["ppg"], 1),
                 "Form": round(p["form"], 1),
-                "Minutes": p["minutes"],
+                "Opta xGI/90": round(p["xgi90"], 2),
                 "Next Fixture": p["next_gw_fixtures"],
                 "FDR": round(p["fdr"], 1),
                 "Price Trend": price_momentum_flag(p),
@@ -868,8 +872,7 @@ with tabs[2]:
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.caption(
-            "Actual FPL points are the foundation of the assessment; form, minutes, "
-            "availability, price trend and fixtures are used to judge the trend."
+            "Underlying Opta xGI, minutes, form, availability, and fixtures form the baseline recommendation."
         )
 
 # ============================================================
@@ -888,14 +891,14 @@ with tabs[3]:
             c1, c2 = st.columns(2)
             with c1:
                 st.success(f"👑 CAPTAIN\n\n### {captain['name']}\n{captain['team']} | {captain['points']} FPL points")
-                st.write(f"Form: **{captain['form']:.1f}**")
+                st.write(f"Form: **{captain['form']:.1f}** | Opta xGI/90: **{captain['xgi90']:.2f}**")
                 st.write(f"PPG: **{captain['ppg']:.1f}**")
                 st.write(f"Next GW fixtures: **{captain['next_gw_fixtures']}**")
                 st.write(captain["fixtures"])
             with c2:
                 if vice:
                     st.info(f"🥈 VICE-CAPTAIN\n\n### {vice['name']}\n{vice['team']} | {vice['points']} FPL points")
-                    st.write(f"Form: **{vice['form']:.1f}**")
+                    st.write(f"Form: **{vice['form']:.1f}** | Opta xGI/90: **{vice['xgi90']:.2f}**")
                     st.write(f"PPG: **{vice['ppg']:.1f}**")
 
             st.divider()
@@ -918,7 +921,7 @@ with tabs[4]:
     st.header("📊 Player Rankings")
     ranking_type = st.radio(
         "Rank players by",
-        ["Actual FPL Points", "Blended Score", "Form", "PPG", "Value"],
+        ["Actual FPL Points", "Blended Score", "Opta xGI/90", "Form", "PPG", "Value"],
         horizontal=True
     )
     position_filter = st.selectbox("Position", ["ALL", "GK", "DEF", "MID", "FWD"])
@@ -938,6 +941,8 @@ with tabs[4]:
         filtered.sort(key=lambda p: p["points"], reverse=True)
     elif ranking_type == "Blended Score":
         filtered.sort(key=blended_score, reverse=True)
+    elif ranking_type == "Opta xGI/90":
+        filtered.sort(key=lambda p: p["xgi90"], reverse=True)
     elif ranking_type == "Form":
         filtered.sort(key=lambda p: p["form"], reverse=True)
     elif ranking_type == "PPG":
@@ -953,12 +958,13 @@ with tabs[4]:
             "Pos": p["position"],
             "Price": f"£{p['price']:.1f}m",
             "FPL Points": p["points"],
+            "Opta xGI/90": round(p["xgi90"], 2),
+            "Opta xGC/90": round(p["xgc90"], 2),
             "PPG": round(p["ppg"], 1),
             "Form": round(p["form"], 1),
             "Minutes": p["minutes"],
             "Goals": p["goals"],
             "Assists": p["assists"],
-            "Bonus": p["bonus"],
             "EP Next": round(p["ep_next"], 1),
             "FDR": round(p["fdr"], 1),
             "Ownership": f"{p['ownership']:.1f}%",
@@ -1097,8 +1103,7 @@ with tabs[7]:
                     st.subheader("Effective ownership within this league")
                     st.caption(
                         f"Captaincy-weighted ownership across the top {len(rival_picks)} "
-                        "teams in your league — a player owned AND captained widely is a "
-                        "much bigger risk/reward than raw ownership shows."
+                        "teams in your league."
                     )
                     eo_counts = defaultdict(float)
                     for entry, picks in rival_picks.items():
@@ -1165,10 +1170,7 @@ with tabs[7]:
 # ============================================================
 with tabs[8]:
     st.header("🏆 Best XI From Your Squad")
-    st.caption(
-        "Finds the highest-scoring valid formation from your 15 players. "
-        "This does not change your actual FPL lineup — it's a suggestion."
-    )
+    st.caption("Finds the highest-scoring valid formation from your 15 players.")
     if not my_squad:
         st.info("Load your FPL team first.")
     elif st.button("Calculate Best XI"):
@@ -1182,6 +1184,7 @@ with tabs[8]:
                 "Pos": p["position"],
                 "Club": p["team"],
                 "FPL Points": p["points"],
+                "Opta xGI/90": round(p["xgi90"], 2),
                 "Blended Score": round(blended_score(p), 1),
             } for p in result["lineup"]]
             st.dataframe(pd.DataFrame(lineup_rows), use_container_width=True, hide_index=True)
@@ -1199,18 +1202,11 @@ with tabs[8]:
 # ============================================================
 with tabs[9]:
     st.header("🛠️ Wildcard Rebuild Suggestion")
-    st.caption(
-        "Builds a fresh 15-man squad from scratch within £100m and the "
-        "3-per-club rule, maximising blended score. Greedy, not exhaustive — "
-        "treat this as a strong starting point to refine manually, not a final answer."
-    )
+    st.caption("Builds a fresh 15-man squad from scratch within £100m using Opta form metrics.")
     if st.button("Suggest a Wildcard squad"):
         squad, leftover = wildcard_rebuild()
         if len(squad) < 15:
-            st.warning(
-                f"Only found {len(squad)}/15 players within budget constraints — "
-                "try refining manually from this partial squad."
-            )
+            st.warning(f"Only found {len(squad)}/15 players within budget constraints.")
         total_cost = SQUAD_BUDGET / 10 - leftover
         st.metric("Squad cost", f"£{total_cost:.1f}m")
         st.metric("Money left in bank", f"£{leftover:.1f}m")
@@ -1221,6 +1217,7 @@ with tabs[9]:
             "Club": p["team"],
             "Price": f"£{p['price']:.1f}m",
             "FPL Points": p["points"],
+            "Opta xGI/90": round(p["xgi90"], 2),
             "Form": round(p["form"], 1),
             "Blended Score": round(blended_score(p), 1),
         } for p in sorted(squad, key=lambda p: (p["position"], -blended_score(p)))]
@@ -1235,59 +1232,81 @@ with tabs[10]:
     if "GEMINI_API_KEY" not in st.secrets:
         st.warning("GEMINI_API_KEY not found in Streamlit Secrets. Please add it in App Settings -> Secrets.")
     else:
-        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        # Manager PIN Gate
+        pin_input = st.text_input("Enter Manager PIN to unlock Assistant", type="password", placeholder="Enter 4-digit PIN")
+        
+        if pin_input != "2325":
+            if pin_input:
+                st.error("Incorrect PIN. Access restricted.")
+            else:
+                st.info("🔒 Enter PIN `2325` to activate the AI Assistant.")
+        else:
+            st.success("🔓 Assistant unlocked.")
 
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
+            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            if "messages" not in st.session_state:
+                st.session_state.messages = []
 
-        if prompt := st.chat_input("Ask about captain picks, transfer strategy, or form..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
+            for msg in st.session_state.messages:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
-            with st.chat_message("assistant"):
-                with st.spinner("Analyzing FPL data..."):
-                    try:
-                        # Append active squad context if available
-                        context = ""
-                        if my_squad:
-                            squad_summary = ", ".join([f"{p['name']} ({p['team']})" for p in my_squad])
-                            context = f"Manager's Current Squad: {squad_summary}\n\n"
+            if prompt := st.chat_input("Ask about captain picks, transfer strategy, or form..."):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
 
-                        full_prompt = f"{context}User Question: {prompt}"
+                with st.chat_message("assistant"):
+                    with st.spinner("Analyzing live FPL & Opta data..."):
+                        try:
+                            # 1. Build rich live context from preloaded data
+                            top_picks = sorted(players, key=blended_score, reverse=True)[:12]
+                            picks_summary = "\n".join([
+                                f"- {p['name']} ({p['team']}, {p['position']}): £{p['price']}m | Form: {p['form']} | Opta xGI/90: {p['xgi90']:.2f} | FDR: {p['fdr']:.1f}"
+                                for p in top_picks
+                            ])
 
-                        response = client.models.generate_content(
-                            model="gemini-3.6-flash",
-                            contents=full_prompt,
-                            config={
-                                "system_instruction": (
-                                    "You are an expert Fantasy Premier League (FPL) strategist. "
-                                    "Provide direct, data-driven advice on transfers, captaincy, "
-                                    "fixtures, and chip strategy."
-                                )
-                            },
-                        )
-                        st.markdown(response.text)
-                        st.session_state.messages.append({"role": "assistant", "content": response.text})
-                    except Exception as e:
-                        st.error(f"Error calling Gemini: {e}")
+                            squad_context = "No squad loaded yet (manager has not entered Team ID)."
+                            if my_squad:
+                                squad_context = "\n".join([
+                                    f"- {p['name']} ({p['team']}, {p['position']}): £{p['price']}m | Form: {p['form']} | Opta xGI/90: {p['xgi90']:.2f} | Fixtures: {p['fixtures']} | Status: {player_status(p)}"
+                                    for p in my_squad
+                                ])
+
+                            live_data_payload = f"""
+Current Gameweek: GW{current_gw} (Planning for GW{next_gw})
+
+Manager's Current 15-Man Squad:
+{squad_context}
+
+Top In-Form & High-Opta-xGI Players in the League:
+{picks_summary}
+
+User Question: {prompt}
+"""
+
+                            # 2. Call Gemini 3.6 Flash with Search Grounding
+                            response = client.models.generate_content(
+                                model="gemini-3.6-flash",
+                                contents=live_data_payload,
+                                config={
+                                    "tools": [{"google_search": {}}],
+                                    "system_instruction": (
+                                        f"You are an elite Fantasy Premier League (FPL) strategist. "
+                                        f"Always base decisions on the live squad context, Opta underlying stats (xGI90, xGC90), "
+                                        f"current GW ({current_gw}), and use Google Search grounding for breaking team news and injury pressers."
+                                    )
+                                },
+                            )
+                            st.markdown(response.text)
+                            st.session_state.messages.append({"role": "assistant", "content": response.text})
+                        except Exception as e:
+                            st.error(f"Error calling Gemini: {e}")
 
 # ============================================================
 # FOOTER
 # ============================================================
 st.divider()
 st.caption("⚽ FPL Assistant Manager — ultimate version")
-st.caption(
-    "Actual FPL points are the primary performance measure. Form, PPG, minutes, "
-    "availability, official expected points, fixtures, price momentum and "
-    "multi-gameweek projections are secondary factors."
-)
-st.caption(
-    "Best XI, Wildcard Rebuild and multi-transfer chains are simplified "
-    "heuristics, not brute-force optimisers — they're built for speed, not "
-    "mathematical guarantees of the single best possible answer."
-)
+st.caption("Data sources: Official FPL API, Opta Event Statistics, Google Search Grounding.")
