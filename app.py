@@ -1,28 +1,13 @@
-from google import genai
-import streamlit as st
-import requests
-import pandas as pd
-import itertools
 from collections import defaultdict
+import itertools
+from google import genai
+import pandas as pd
+import requests
+import streamlit as st
 
 # ============================================================
 # FPL ASSISTANT MANAGER — ULTIMATE VERSION
-#
-# Builds on the fast version. Adds:
-# - Budget + 3-per-club aware transfer engine (single AND
-#   multi-transfer / sell-two-buy-one chains)
-# - Multi-gameweek hit value (not just next-GW gain)
-# - Best XI / formation optimiser (opt-in tab, doesn't run
-#   unless requested — keeps the app fast by default)
-# - Bench Boost calculator using real GW points
-# - Triple Captain projection
-# - Wildcard rebuild suggestion (budget-constrained squad)
-# - Price-change risk flag (transfer momentum proxy)
-# - Season rank history chart
-# - Deeper mini-league: full rival differential matrix +
-#   effective (captaincy-weighted) ownership within league
 # ============================================================
-
 st.set_page_config(
     page_title="FPL Assistant Manager",
     page_icon="⚽",
@@ -31,29 +16,30 @@ st.set_page_config(
 
 API = "https://fantasy.premierleague.com/api"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-
 FIXTURE_HORIZON = 5
-SQUAD_BUDGET = 1000       # tenths of £m, i.e. £100.0m
+SQUAD_BUDGET = 1000  # tenths of £m, i.e. £100.0m
 MAX_PER_CLUB = 3
-HIT_PROJECTION_WEEKS = 4  # how many GWs a -4 hit's value is judged over
+HIT_PROJECTION_WEEKS = 4
 
 VALID_FORMATIONS = [
-    # (DEF, MID, FWD) — GK is always 1
-    (3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 3, 3),
-    (4, 5, 1), (5, 4, 1), (5, 3, 2), (5, 2, 3),
+    (3, 4, 3),
+    (3, 5, 2),
+    (4, 4, 2),
+    (4, 3, 3),
+    (4, 5, 1),
+    (5, 4, 1),
+    (5, 3, 2),
+    (5, 2, 3),
 ]
-
 
 # ============================================================
 # API FUNCTIONS
 # ============================================================
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_entry_info(entry_id):
     r = requests.get(f"{API}/entry/{entry_id}/", headers=HEADERS, timeout=15)
     r.raise_for_status()
     return r.json()
-
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_entry_picks(entry_id, gameweek):
@@ -61,13 +47,11 @@ def get_entry_picks(entry_id, gameweek):
     r.raise_for_status()
     return r.json()
 
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_league(league_id):
     r = requests.get(f"{API}/leagues-classic/{league_id}/standings/", headers=HEADERS, timeout=15)
     r.raise_for_status()
     return r.json()
-
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_team_history(entry_id):
@@ -75,26 +59,16 @@ def get_team_history(entry_id):
     r.raise_for_status()
     return r.json()
 
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_live_gw(gameweek):
-    """Actual per-player points for a specific gameweek (needed for
-    Bench Boost calculation — total_points is season-to-date, not per-GW)."""
     r = requests.get(f"{API}/event/{gameweek}/live/", headers=HEADERS, timeout=15)
     r.raise_for_status()
     data = r.json()
-    return {
-        el["id"]: el["stats"]["total_points"]
-        for el in data.get("elements", [])
-    }
-
+    return {el["id"]: el["stats"]["total_points"] for el in data.get("elements", [])}
 
 # ============================================================
 # PURE HELPER FUNCTIONS
-# (defined before the cached loader so it can call them —
-# these are cheap and don't need their own caching)
 # ============================================================
-
 def num(value, default=0.0):
     try:
         if value is None:
@@ -102,7 +76,6 @@ def num(value, default=0.0):
         return float(value)
     except Exception:
         return default
-
 
 def availability_factor(player):
     chance = player["chance"]
@@ -116,12 +89,7 @@ def availability_factor(player):
         return 0.30
     return 0
 
-
 def calc_blended_score(player):
-    """Ranking score, not a points prediction. Actual points earned
-    remain the biggest single component by design. This is the ONE
-    place this math happens — it's computed once per player inside
-    the cached loader below, not recomputed on every rerun."""
     actual_points = player["points"]
     ppg_component = min(player["ppg"] * 2.0, 15)
     form_component = min(player["form"] * 1.5, 12)
@@ -130,27 +98,27 @@ def calc_blended_score(player):
     availability = availability_factor(player) * 5
     dgw_bonus = 8 if player["next_gw_fixtures"] >= 2 else 0
     bgw_penalty = 20 if player["next_gw_fixtures"] == 0 else 0
-
     defensive_component = 0
     if player["position"] in ("GK", "DEF") and player["xgc90"] > 0:
         defensive_component = max(0, (1.3 - player["xgc90"]) * 4)
 
     return round(
-        actual_points + ppg_component + form_component + expected_component
-        + fixture_component + availability + dgw_bonus - bgw_penalty
+        actual_points
+        + ppg_component
+        + form_component
+        + expected_component
+        + fixture_component
+        + availability
+        + dgw_bonus
+        - bgw_penalty
         + defensive_component,
         2
     )
 
-
 def calc_multi_gw_projection(player, fixture_map, weeks=HIT_PROJECTION_WEEKS):
-    """Rough projected points over the next N gameweeks. Also computed
-    once at load time and cached — it's only ever called with the
-    default `weeks` value elsewhere in the app."""
     games = sorted(fixture_map.get(player["team_id"], []), key=lambda x: x["gw"])[:weeks]
     if not games:
         return player["ep_next"]
-
     base_per_fixture = (player["ep_next"] * 0.6) + (player["ppg"] * 0.4)
     total = 0.0
     for g in games:
@@ -158,32 +126,24 @@ def calc_multi_gw_projection(player, fixture_map, weeks=HIT_PROJECTION_WEEKS):
         total += base_per_fixture * difficulty_multiplier * availability_factor(player)
     return round(total, 1)
 
-
 def price_momentum_flag(player):
-    """Proxy for imminent price change based on net transfer activity.
-    FPL's real threshold is undisclosed and ownership-relative, so this
-    is directional, not a guarantee."""
     net = player["net_transfers"]
     ownership = max(player["ownership"], 0.1)
     ratio = net / (ownership * 1000)
-
     if ratio > 0.4:
         return "📈 Likely to rise"
     if ratio < -0.4:
         return "📉 Likely to fall"
     return "— Stable"
 
-
 def fixture_count(fixture_map, team_id, gw):
     return len([f for f in fixture_map.get(team_id, []) if f["gw"] == gw])
-
 
 def average_fdr(fixture_map, team_id):
     games = fixture_map.get(team_id, [])
     if not games:
         return 3.0
     return sum(f["difficulty"] for f in games) / len(games)
-
 
 def fixture_text(fixture_map, team_names, team_id, number=5):
     games = sorted(fixture_map.get(team_id, []), key=lambda x: (x["gw"], not x["home"]))[:number]
@@ -194,19 +154,9 @@ def fixture_text(fixture_map, team_names, team_id, number=5):
         out.append(f"GW{f['gw']} {opponent} ({location}) [{f['difficulty']}]")
     return " | ".join(out) if out else "No fixtures"
 
-
 # ============================================================
 # CACHED DATA LOADER
-#
-# THE key efficiency fix: bootstrap, fixtures, the fixture map,
-# AND the full 700-player database (with blended_score and the
-# multi-GW projection precomputed) are all built ONCE inside a
-# single cached function. Streamlit reruns the whole script on
-# every click, but this entire block is skipped on every rerun
-# until the 15-minute cache expires — instead of rebuilding ~700
-# players and recalculating scores on every single interaction.
 # ============================================================
-
 @st.cache_data(ttl=900, show_spinner="Loading FPL data...")
 def load_fpl_data():
     r = requests.get(f"{API}/bootstrap-static/", headers=HEADERS, timeout=15)
@@ -239,12 +189,16 @@ def load_fpl_data():
         away = fixture.get("team_a")
         if home:
             fixture_map[home].append({
-                "gw": gw, "home": True, "opponent": away,
+                "gw": gw,
+                "home": True,
+                "opponent": away,
                 "difficulty": fixture.get("team_h_difficulty", 3)
             })
         if away:
             fixture_map[away].append({
-                "gw": gw, "home": False, "opponent": home,
+                "gw": gw,
+                "home": False,
+                "opponent": home,
                 "difficulty": fixture.get("team_a_difficulty", 3)
             })
 
@@ -254,7 +208,6 @@ def load_fpl_data():
         chance = p.get("chance_of_playing_next_round")
         if chance is None:
             chance = 100
-
         transfers_in = p.get("transfers_in_event", 0)
         transfers_out = p.get("transfers_out_event", 0)
 
@@ -290,16 +243,11 @@ def load_fpl_data():
             "price_change": p.get("cost_change_event", 0),
             "price_change_overall": p.get("cost_change_start", 0),
         }
-
         player["fdr"] = average_fdr(fixture_map, team_id)
         player["next_gw_fixtures"] = fixture_count(fixture_map, team_id, next_gw)
         player["fixtures"] = fixture_text(fixture_map, team_names, team_id, FIXTURE_HORIZON)
-
-        # Precompute the two expensive-ish derived scores ONCE here,
-        # rather than every time a table is sorted or filtered.
         player["blended"] = calc_blended_score(player)
         player["projection_4gw"] = calc_multi_gw_projection(player, fixture_map)
-
         players.append(player)
 
     player_by_id = {p["id"]: p for p in players}
@@ -314,7 +262,6 @@ def load_fpl_data():
         "players": players,
         "player_by_id": player_by_id,
     }
-
 
 try:
     _data = load_fpl_data()
@@ -331,25 +278,17 @@ fixture_map = _data["fixture_map"]
 players = _data["players"]
 player_by_id = _data["player_by_id"]
 
-
 def blended_score(player):
-    """Thin lookup — the real calculation ran once inside load_fpl_data()."""
     return player["blended"]
 
-
 def multi_gw_projection(player, weeks=HIT_PROJECTION_WEEKS):
-    """Thin lookup for the default window (the only way this is ever
-    called elsewhere in the app). Falls back to a live calc only if
-    someone passes a non-default `weeks`."""
     if weeks == HIT_PROJECTION_WEEKS:
         return player["projection_4gw"]
     return calc_multi_gw_projection(player, fixture_map, weeks=weeks)
 
-
 # ============================================================
 # PLAYER STATUS
 # ============================================================
-
 def player_status(player):
     if player["status"] != "a":
         return "🔴 Unavailable"
@@ -369,11 +308,9 @@ def player_status(player):
         return "🔴 Poor form"
     return "🟡 Monitor"
 
-
 # ============================================================
 # MY TEAM
 # ============================================================
-
 def load_my_team(entry_id):
     data = get_entry_picks(entry_id, current_gw)
     squad = []
@@ -388,7 +325,6 @@ def load_my_team(entry_id):
             squad.append(copied)
     return data, squad
 
-
 def squad_club_counts(squad, exclude_id=None):
     counts = defaultdict(int)
     for p in squad:
@@ -396,16 +332,13 @@ def squad_club_counts(squad, exclude_id=None):
             counts[p["team_id"]] += 1
     return counts
 
-
 # ============================================================
-# TRANSFER ENGINE — budget + 3-per-club aware, single transfers
+# TRANSFER ENGINE
 # ============================================================
-
 def transfer_suggestions(squad, bank, free_transfers):
     owned_ids = {p["id"] for p in squad}
     club_counts = squad_club_counts(squad)
     suggestions = []
-
     for outgoing in squad:
         same_position = [
             p for p in players
@@ -415,28 +348,21 @@ def transfer_suggestions(squad, bank, free_transfers):
             and p["chance"] > 0
         ]
         same_position.sort(key=blended_score, reverse=True)
-
         for incoming in same_position[:20]:
             available_money = bank + outgoing["price"]
             if incoming["price"] > available_money:
                 continue
 
-            # 3-per-club constraint: check the count AFTER removing the
-            # outgoing player and adding the incoming one.
             projected_count = club_counts[incoming["team_id"]]
             if incoming["team_id"] == outgoing["team_id"]:
-                projected_count -= 1  # outgoing's club slot frees up
+                projected_count -= 1
             if projected_count + 1 > MAX_PER_CLUB:
                 continue
 
             gain = blended_score(incoming) - blended_score(outgoing)
             projected_gain = multi_gw_projection(incoming) - multi_gw_projection(outgoing)
             hit = 0 if free_transfers > 0 else 4
-
             if hit == 4:
-                # Judge the hit against points over the projection window,
-                # not just next GW — a -4 pays for itself if the swap
-                # nets more than 4 points across HIT_PROJECTION_WEEKS.
                 if projected_gain < 4:
                     continue
             else:
@@ -451,25 +377,17 @@ def transfer_suggestions(squad, bank, free_transfers):
                 "hit": hit,
                 "cost_difference": incoming["price"] - outgoing["price"],
             })
-
     suggestions.sort(key=lambda x: (x["projected_gain"] - x["hit"]), reverse=True)
     return suggestions[:10]
 
-
 # ============================================================
-# MULTI-TRANSFER ENGINE — sell two, buy one premium
+# MULTI-TRANSFER ENGINE
 # ============================================================
-
 def multi_transfer_suggestions(squad, bank, free_transfers, max_results=6):
-    """Finds sell-two-buy-one-premium moves that a 1-for-1 engine can't
-    see: freeing two mid-price players to afford one standout, while
-    respecting budget and the 3-per-club limit."""
     owned_ids = {p["id"] for p in squad}
     club_counts = squad_club_counts(squad)
     results = []
 
-    # Only consider outfield positions in pairs (rarely worth doing this
-    # with goalkeepers) and cap combinations to keep it fast.
     candidates_by_position = defaultdict(list)
     for p in squad:
         if p["position"] != "GK":
@@ -480,8 +398,6 @@ def multi_transfer_suggestions(squad, bank, free_transfers, max_results=6):
     for position, group in candidates_by_position.items():
         if len(group) < 2:
             continue
-
-        # Weakest two first — cheapest way to fund an upgrade.
         weakest_pairs = sorted(
             itertools.combinations(group, 2),
             key=lambda pair: blended_score(pair[0]) + blended_score(pair[1])
@@ -498,7 +414,6 @@ def multi_transfer_suggestions(squad, bank, free_transfers, max_results=6):
 
         for out_a, out_b in weakest_pairs:
             available_money = bank + out_a["price"] + out_b["price"]
-
             projected_counts = club_counts.copy()
             projected_counts[out_a["team_id"]] -= 1
             projected_counts[out_b["team_id"]] -= 1
@@ -514,9 +429,7 @@ def multi_transfer_suggestions(squad, bank, free_transfers, max_results=6):
                     - multi_gw_projection(out_a)
                     - multi_gw_projection(out_b)
                 )
-                # This leaves one squad slot empty in this simplified
-                # model — treat as "and one more free-agent-quality player"
-                # rather than a literal 2-for-1.
+
                 if projected_gain - hit_cost < 6:
                     continue
 
@@ -531,11 +444,9 @@ def multi_transfer_suggestions(squad, bank, free_transfers, max_results=6):
     results.sort(key=lambda x: (x["projected_gain"] - x["hit"]), reverse=True)
     return results[:max_results]
 
-
 # ============================================================
 # SELL-TO-FUND ENGINE
 # ============================================================
-
 def sell_to_fund_recommendations(squad, bank):
     recommendations = []
     owned_ids = {p["id"] for p in squad}
@@ -544,7 +455,6 @@ def sell_to_fund_recommendations(squad, bank):
     for outgoing in squad:
         if outgoing["price"] < 5.0:
             continue
-
         replacements = [
             p for p in players
             if p["position"] == outgoing["position"]
@@ -553,32 +463,29 @@ def sell_to_fund_recommendations(squad, bank):
             and p["chance"] >= 75
         ]
         replacements.sort(key=blended_score, reverse=True)
-
         for incoming in replacements[:10]:
             saving = outgoing["price"] - incoming["price"]
             if saving < 0.5:
                 continue
-
             projected_count = club_counts[incoming["team_id"]]
             if incoming["team_id"] == outgoing["team_id"]:
                 projected_count -= 1
             if projected_count + 1 > MAX_PER_CLUB:
                 continue
-
             gain = blended_score(incoming) - blended_score(outgoing)
             if gain >= -5:
                 recommendations.append({
-                    "out": outgoing, "in": incoming, "saving": saving, "gain": gain
+                    "out": outgoing,
+                    "in": incoming,
+                    "saving": saving,
+                    "gain": gain
                 })
-
     recommendations.sort(key=lambda x: x["saving"], reverse=True)
     return recommendations[:8]
-
 
 # ============================================================
 # CAPTAIN RECOMMENDATION
 # ============================================================
-
 def captain_recommendations(squad):
     available = [
         p for p in squad
@@ -587,11 +494,7 @@ def captain_recommendations(squad):
     available.sort(key=blended_score, reverse=True)
     return available[:5]
 
-
 def triple_captain_projection(squad):
-    """Compares the top captain pick's projected haul this GW against
-    their own recent scoring history, to flag whether a DGW/soft
-    fixture genuinely looks like a Triple Captain-worthy spike."""
     candidates = captain_recommendations(squad)
     if not candidates:
         return None
@@ -606,11 +509,9 @@ def triple_captain_projection(squad):
         "uplift": round(uplift, 1),
     }
 
-
 # ============================================================
 # HOLD / SELL
 # ============================================================
-
 def hold_sell(player):
     score = blended_score(player)
     if player["status"] != "a":
@@ -629,20 +530,13 @@ def hold_sell(player):
         return "🟢 HOLD"
     return "🟡 MONITOR"
 
-
 # ============================================================
-# BEST XI OPTIMISER (opt-in — not run automatically)
+# BEST XI OPTIMISER
 # ============================================================
-
 def best_xi(squad):
-    """Picks the highest blended-score valid formation from the 15-man
-    squad. Deliberately simple (pick best N per position per formation,
-    take the best formation) rather than a full ILP — fast, and good
-    enough since squads are only 15 players."""
     by_position = defaultdict(list)
     for p in squad:
         by_position[p["position"]].append(p)
-
     for pos in by_position:
         by_position[pos].sort(key=blended_score, reverse=True)
 
@@ -664,7 +558,6 @@ def best_xi(squad):
 
         lineup = [gks[0]] + available_def[:defs] + available_mid[:mids] + available_fwd[:fwds]
         total = sum(blended_score(p) for p in lineup)
-
         if total > best_score:
             best_score = total
             best_formation = f"{defs}-{mids}-{fwds}"
@@ -673,16 +566,10 @@ def best_xi(squad):
     bench = [p for p in squad if p not in (best_lineup or [])]
     return {"formation": best_formation, "lineup": best_lineup, "bench": bench}, best_score
 
-
 # ============================================================
-# WILDCARD REBUILD SUGGESTION (opt-in)
+# WILDCARD REBUILD SUGGESTION
 # ============================================================
-
 def wildcard_rebuild(total_budget=SQUAD_BUDGET):
-    """Suggests a fresh 15-man squad within budget and the 3-per-club
-    rule, maximising blended score. Greedy construction, not a true
-    optimiser — a good starting point to manually refine, not a final
-    answer."""
     budget = total_budget / 10
     club_counts = defaultdict(int)
     squad = []
@@ -695,8 +582,6 @@ def wildcard_rebuild(total_budget=SQUAD_BUDGET):
     for pos in pool_by_position:
         pool_by_position[pos].sort(key=blended_score, reverse=True)
 
-    # Reserve minimum spend for cheap bench fodder so the whole budget
-    # isn't burned on starters with no bench left to afford.
     for position, count in quota.items():
         candidates = pool_by_position[position]
         picked = 0
@@ -707,7 +592,7 @@ def wildcard_rebuild(total_budget=SQUAD_BUDGET):
                 continue
             remaining_slots = sum(quota.values()) - len(squad) - 1
             if budget - p["price"] < remaining_slots * 4.0:
-                continue  # keep enough for remaining minimum-price slots
+                continue
             squad.append(p)
             club_counts[p["team_id"]] += 1
             budget -= p["price"]
@@ -715,19 +600,14 @@ def wildcard_rebuild(total_budget=SQUAD_BUDGET):
 
     return squad, round(budget, 1)
 
-
 # ============================================================
 # CHIP ANALYSIS
 # ============================================================
-
 def bench_boost_value(squad, entry_id):
-    """Uses actual live GW points (not season totals) for bench players
-    to show exactly what Bench Boost would have added this gameweek."""
     try:
         live_points = get_live_gw(current_gw)
     except Exception:
         return None
-
     bench = [p for p in squad if p.get("multiplier", 1) == 0]
     rows = []
     total = 0
@@ -737,11 +617,9 @@ def bench_boost_value(squad, entry_id):
         rows.append({"Player": p["name"], "GW Points": pts})
     return rows, total
 
-
 def chip_recommendation(squad, history):
     recommendations = []
     used_chips = []
-
     if history:
         for chip in history.get("chips", []):
             name = chip.get("name", "")
@@ -756,51 +634,39 @@ def chip_recommendation(squad, history):
             "⚡ Your squad has a strong number of Double-GW players. "
             "Consider whether a Bench Boost or Triple Captain window is approaching."
         )
-
     if squad_bgw_count >= 4:
         recommendations.append(
             "⚠️ You have several players without a fixture next GW. "
             "This could become a useful Wildcard / Free Hit planning point."
         )
-
     if not recommendations:
         recommendations.append(
             "No obvious reason to use a chip immediately. "
             "Holding chips for a stronger DGW/BGW opportunity is sensible."
         )
-
     return recommendations, used_chips
-
 
 # ============================================================
 # PAGE HEADER
 # ============================================================
-
 st.title("⚽ FPL Assistant Manager")
 st.caption(
     f"GW{current_gw} | Planning for GW{next_gw} | "
     "Actual FPL points + form + fixtures + expected points"
 )
 
-
 # ============================================================
 # SIDEBAR
 # ============================================================
-
 with st.sidebar:
     st.header("⚙️ Manager Settings")
-
     entry_id = st.text_input(
-        "Your FPL Team ID", value="",
-        help="Your Team ID is in the URL of your FPL team."
+        "Your FPL Team ID", value="", help="Your Team ID is in the URL of your FPL team."
     )
-
     league_id = st.text_input("Mini-League ID (optional)", value="")
-
     free_transfers = st.number_input(
         "Free transfers available", min_value=0, max_value=5, value=1
     )
-
     st.divider()
     st.caption(
         "Best XI, Wildcard Rebuild and the multi-transfer chain finder "
@@ -808,14 +674,12 @@ with st.sidebar:
         "than the core tabs, so they don't run automatically."
     )
 
-
 # ============================================================
 # TABS
 # ============================================================
-
 tabs = st.tabs([
     "👤 My Team",
-    "🔁 Transfers",
+    "🔄 Transfers",
     "🩺 Hold / Sell",
     "🧢 Captain",
     "📊 Player Rankings",
@@ -825,30 +689,24 @@ tabs = st.tabs([
     "🏆 Best XI",
     "🛠️ Wildcard",
     "💬 AI Assistant",
-]) 
-
+])
 
 # ============================================================
 # LOAD TEAM
 # ============================================================
-
 team_data = None
 my_squad = []
-
 if entry_id:
     try:
         team_data, my_squad = load_my_team(int(entry_id))
     except Exception:
         st.error("Couldn't load your FPL team. Check the Team ID.")
 
-
 # ============================================================
 # TAB 1 — MY TEAM
 # ============================================================
-
 with tabs[0]:
     st.header("👤 My FPL Team")
-
     if not my_squad:
         st.info("Enter your FPL Team ID in the sidebar.")
     else:
@@ -865,19 +723,24 @@ with tabs[0]:
         c4.metric("Bank", f"£{bank:.1f}m")
 
         st.divider()
-
         rows = []
         for p in my_squad:
             role = "© Captain" if p.get("is_captain") else ("VC" if p.get("is_vice") else "")
             rows.append({
-                "Player": p["name"], "Club": p["team"], "Pos": p["position"],
-                "Role": role, "Price": f"£{p['price']:.1f}m", "FPL Points": p["points"],
-                "PPG": round(p["ppg"], 1), "Form": round(p["form"], 1),
-                "Minutes": p["minutes"], "Next GW": p["next_gw_fixtures"],
-                "FDR": round(p["fdr"], 1), "Price Trend": price_momentum_flag(p),
+                "Player": p["name"],
+                "Club": p["team"],
+                "Pos": p["position"],
+                "Role": role,
+                "Price": f"£{p['price']:.1f}m",
+                "FPL Points": p["points"],
+                "PPG": round(p["ppg"], 1),
+                "Form": round(p["form"], 1),
+                "Minutes": p["minutes"],
+                "Next GW": p["next_gw_fixtures"],
+                "FDR": round(p["fdr"], 1),
+                "Price Trend": price_momentum_flag(p),
                 "Status": player_status(p),
             })
-
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
         st.divider()
@@ -902,22 +765,17 @@ with tabs[0]:
         except Exception:
             st.caption("Rank history unavailable right now.")
 
-
 # ============================================================
 # TAB 2 — TRANSFERS
 # ============================================================
-
 with tabs[1]:
-    st.header("🔁 Transfer Recommendations")
-
+    st.header("🔄 Transfer Recommendations")
     if not my_squad:
         st.info("Load your FPL team first.")
     else:
         entry_history = team_data.get("entry_history", {})
         bank = entry_history.get("bank", 0) / 10
-
         suggestions = transfer_suggestions(my_squad, bank, free_transfers)
-
         st.write(f"Bank: **£{bank:.1f}m** | Free transfers: **{free_transfers}**")
         st.caption(
             f"Hit decisions are judged against projected points over the next "
@@ -932,12 +790,12 @@ with tabs[1]:
                 hit_text = "FREE TRANSFER" if s["hit"] == 0 else "-4 HIT"
                 cost = s["cost_difference"]
                 money_text = (
-                    f"Costs £{cost:.1f}m more" if cost > 0
+                    f"Costs £{cost:.1f}m more"
+                    if cost > 0
                     else (f"Frees £{abs(cost):.1f}m" if cost < 0 else "Same price")
                 )
 
                 st.markdown(f"### {number}. {outgoing['name']} ➡️ {incoming['name']}")
-
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("OUT Points", outgoing["points"])
                 c2.metric("IN Points", incoming["points"])
@@ -954,12 +812,10 @@ with tabs[1]:
                         "This -4 is only shown because the projected gain over "
                         f"{HIT_PROJECTION_WEEKS} GWs outweighs the hit — still your call."
                     )
-
                 st.divider()
 
-        st.subheader("🔀 Multi-transfer chains (sell two, buy one premium)")
+        st.subheader("🔄 Multi-transfer chains (sell two, buy one premium)")
         st.caption("Off by default — computes more combinations than the single-transfer list above.")
-
         if st.button("Find multi-transfer chains"):
             multi = multi_transfer_suggestions(my_squad, bank, free_transfers)
             if not multi:
@@ -973,8 +829,8 @@ with tabs[1]:
                         f"{HIT_PROJECTION_WEEKS}GW projected gain: +{s['projected_gain']:.1f} | "
                         f"Hit: -{s['hit']}"
                     )
-                    st.divider()
 
+        st.divider()
         st.subheader("💰 Sell a premium player to free money")
         funding = sell_to_fund_recommendations(my_squad, bank)
         if not funding:
@@ -987,25 +843,28 @@ with tabs[1]:
                 )
                 st.write(f"💰 Frees **£{s['saving']:.1f}m** | Score change: {s['gain']:+.1f}")
 
-
 # ============================================================
 # TAB 3 — HOLD / SELL
 # ============================================================
-
 with tabs[2]:
     st.header("🩺 Hold / Sell Diagnostics")
-
     if not my_squad:
         st.info("Load your FPL team first.")
     else:
         rows = []
         for p in my_squad:
             rows.append({
-                "Player": p["name"], "Club": p["team"], "Pos": p["position"],
-                "FPL Points": p["points"], "PPG": round(p["ppg"], 1),
-                "Form": round(p["form"], 1), "Minutes": p["minutes"],
-                "Next Fixture": p["next_gw_fixtures"], "FDR": round(p["fdr"], 1),
-                "Price Trend": price_momentum_flag(p), "Decision": hold_sell(p),
+                "Player": p["name"],
+                "Club": p["team"],
+                "Pos": p["position"],
+                "FPL Points": p["points"],
+                "PPG": round(p["ppg"], 1),
+                "Form": round(p["form"], 1),
+                "Minutes": p["minutes"],
+                "Next Fixture": p["next_gw_fixtures"],
+                "FDR": round(p["fdr"], 1),
+                "Price Trend": price_momentum_flag(p),
+                "Decision": hold_sell(p),
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.caption(
@@ -1013,19 +872,15 @@ with tabs[2]:
             "availability, price trend and fixtures are used to judge the trend."
         )
 
-
 # ============================================================
 # TAB 4 — CAPTAIN
 # ============================================================
-
 with tabs[3]:
     st.header("🧢 Captain & Vice-Captain")
-
     if not my_squad:
         st.info("Load your FPL team first.")
     else:
         captain_list = captain_recommendations(my_squad)
-
         if captain_list:
             captain = captain_list[0]
             vice = captain_list[1] if len(captain_list) > 1 else None
@@ -1037,7 +892,6 @@ with tabs[3]:
                 st.write(f"PPG: **{captain['ppg']:.1f}**")
                 st.write(f"Next GW fixtures: **{captain['next_gw_fixtures']}**")
                 st.write(captain["fixtures"])
-
             with c2:
                 if vice:
                     st.info(f"🥈 VICE-CAPTAIN\n\n### {vice['name']}\n{vice['team']} | {vice['points']} FPL points")
@@ -1057,14 +911,11 @@ with tabs[3]:
                 else:
                     st.caption("No unusual spike detected — probably not worth a Triple Captain here.")
 
-
 # ============================================================
 # TAB 5 — PLAYER RANKINGS
 # ============================================================
-
 with tabs[4]:
     st.header("📊 Player Rankings")
-
     ranking_type = st.radio(
         "Rank players by",
         ["Actual FPL Points", "Blended Score", "Form", "PPG", "Value"],
@@ -1097,26 +948,31 @@ with tabs[4]:
     rows = []
     for p in filtered[:100]:
         rows.append({
-            "Player": p["name"], "Club": p["team"], "Pos": p["position"],
-            "Price": f"£{p['price']:.1f}m", "FPL Points": p["points"],
-            "PPG": round(p["ppg"], 1), "Form": round(p["form"], 1),
-            "Minutes": p["minutes"], "Goals": p["goals"], "Assists": p["assists"],
-            "Bonus": p["bonus"], "EP Next": round(p["ep_next"], 1), "FDR": round(p["fdr"], 1),
-            "Ownership": f"{p['ownership']:.1f}%", "Price Trend": price_momentum_flag(p),
+            "Player": p["name"],
+            "Club": p["team"],
+            "Pos": p["position"],
+            "Price": f"£{p['price']:.1f}m",
+            "FPL Points": p["points"],
+            "PPG": round(p["ppg"], 1),
+            "Form": round(p["form"], 1),
+            "Minutes": p["minutes"],
+            "Goals": p["goals"],
+            "Assists": p["assists"],
+            "Bonus": p["bonus"],
+            "EP Next": round(p["ep_next"], 1),
+            "FDR": round(p["fdr"], 1),
+            "Ownership": f"{p['ownership']:.1f}%",
+            "Price Trend": price_momentum_flag(p),
             "Blended": round(blended_score(p), 1),
         })
-
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
 
 # ============================================================
 # TAB 6 — FIXTURES
 # ============================================================
-
 with tabs[5]:
     st.header("📅 Fixture Difficulty")
     st.write(f"Looking ahead from GW{next_gw} over the next {FIXTURE_HORIZON} gameweeks.")
-
     fixture_rows = []
     for team_id, team in teams.items():
         fixture_rows.append({
@@ -1124,12 +980,10 @@ with tabs[5]:
             "Average FDR": round(average_fdr(fixture_map, team_id), 2),
             "Fixtures": fixture_text(fixture_map, team_names, team_id, FIXTURE_HORIZON),
         })
-
     fixture_df = pd.DataFrame(fixture_rows).sort_values("Average FDR")
     st.dataframe(fixture_df, use_container_width=True, hide_index=True)
 
     st.divider()
-
     dgw_teams, bgw_teams = [], []
     for team_id in teams:
         count = fixture_count(fixture_map, team_id, next_gw)
@@ -1143,14 +997,11 @@ with tabs[5]:
     if bgw_teams:
         st.warning(f"⚠️ GW{next_gw} Blank Gameweek: " + ", ".join(bgw_teams))
 
-
 # ============================================================
 # TAB 7 — CHIPS
 # ============================================================
-
 with tabs[6]:
     st.header("💊 Chip Strategy")
-
     if not my_squad:
         st.info("Load your FPL team to analyse your chip position.")
     else:
@@ -1158,7 +1009,6 @@ with tabs[6]:
             history = get_team_history(int(entry_id))
         except Exception:
             history = None
-
         recommendations, used_chips = chip_recommendation(my_squad, history)
 
         st.subheader("Current recommendation")
@@ -1167,7 +1017,6 @@ with tabs[6]:
 
         st.divider()
         st.subheader("Your next-gameweek squad situation")
-
         dgw_count = sum(1 for p in my_squad if p["next_gw_fixtures"] >= 2)
         bgw_count = sum(1 for p in my_squad if p["next_gw_fixtures"] == 0)
 
@@ -1183,7 +1032,6 @@ with tabs[6]:
         st.divider()
         st.subheader("🪑 Bench Boost calculator")
         st.caption(f"Uses actual GW{current_gw} points, not season totals.")
-
         bb = bench_boost_value(my_squad, entry_id)
         if bb:
             rows, total = bb
@@ -1195,14 +1043,11 @@ with tabs[6]:
         else:
             st.caption("Live GW data unavailable right now.")
 
-
 # ============================================================
 # TAB 8 — MINI LEAGUE
 # ============================================================
-
 with tabs[7]:
     st.header("🕵️ Mini-League Rival Analysis")
-
     if not league_id:
         st.info("Enter your Mini-League ID in the sidebar.")
     elif not my_squad:
@@ -1211,7 +1056,6 @@ with tabs[7]:
         try:
             league = get_league(int(league_id))
             standings = league.get("standings", {}).get("results", [])
-
             if not standings:
                 st.warning("No league standings found.")
             else:
@@ -1220,131 +1064,111 @@ with tabs[7]:
 
                 if my_entry:
                     gap = leader["total"] - my_entry["total"]
-
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Your Rank", f"#{my_entry['rank']}")
                     c2.metric("Leader", leader["player_name"])
                     c3.metric("Points Behind", gap)
 
+                st.divider()
+                cache_key = f"{league_id}_{current_gw}"
+                rivals = standings[:10]
+
+                if st.button("🔄 Load rival squads (differentials & effective ownership)"):
+                    rival_picks = {}
+                    for rival in rivals:
+                        try:
+                            data = get_entry_picks(rival["entry"], current_gw)
+                            rival_picks[rival["entry"]] = data.get("picks", [])
+                        except Exception:
+                            continue
+                    st.session_state["rival_cache_key"] = cache_key
+                    st.session_state["rival_picks"] = rival_picks
+
+                if st.session_state.get("rival_cache_key") != cache_key:
+                    st.info(
+                        "Click the button above to fetch rival squads. "
+                        "This makes several live API calls, so it's opt-in "
+                        "rather than automatic."
+                    )
+                else:
+                    rival_picks = st.session_state["rival_picks"]
+                    my_ids = {p["id"] for p in my_squad}
+
+                    st.subheader("Effective ownership within this league")
+                    st.caption(
+                        f"Captaincy-weighted ownership across the top {len(rival_picks)} "
+                        "teams in your league — a player owned AND captained widely is a "
+                        "much bigger risk/reward than raw ownership shows."
+                    )
+                    eo_counts = defaultdict(float)
+                    for entry, picks in rival_picks.items():
+                        for pick in picks:
+                            weight = pick.get("multiplier", 1)
+                            eo_counts[pick["element"]] += weight
+
+                    eo_rows = []
+                    for pid, weight in sorted(eo_counts.items(), key=lambda x: x[1], reverse=True)[:15]:
+                        p = player_by_id.get(pid)
+                        if p:
+                            eo_rows.append({
+                                "Player": p["name"],
+                                "Effective Ownership (weighted)": round(weight / max(len(rival_picks), 1) * 100, 1),
+                                "In Your Squad": "✅" if pid in my_ids else "—",
+                            })
+                    st.dataframe(pd.DataFrame(eo_rows), use_container_width=True, hide_index=True)
+
                     st.divider()
+                    st.subheader("Full rival differential matrix")
+                    matrix_rows = []
+                    for rival in rivals:
+                        rival_ids = {
+                            pick["id"]
+                            for pick in [{"id": pick["element"]} for pick in rival_picks.get(rival["entry"], [])]
+                        }
+                        overlap = len(my_ids & rival_ids)
+                        matrix_rows.append({
+                            "Rival": rival["player_name"],
+                            "Rank": rival["rank"],
+                            "Total Points": rival["total"],
+                            "Squad Overlap": f"{overlap}/15",
+                            "Differentials (theirs)": len(rival_ids - my_ids),
+                        })
+                    st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True, hide_index=True)
 
-                    # This is the other big efficiency fix: pulling picks
-                    # for 10 rivals is 10 sequential API calls. Streamlit
-                    # reruns this whole tab block on EVERY interaction
-                    # anywhere in the app (not just clicks in this tab),
-                    # so leaving this automatic meant 10 live requests
-                    # firing on every rerun the moment a league ID was
-                    # entered. Gate it behind a button and cache the
-                    # result in session_state, keyed to this league+GW,
-                    # so it only re-fetches when you actually ask it to.
-                    cache_key = f"{league_id}_{current_gw}"
-                    rivals = standings[:10]
+                    st.divider()
+                    st.subheader(f"Head-to-head vs {leader['player_name']} (leader)")
+                    leader_ids = {pick["element"] for pick in rival_picks.get(leader["entry"], [])}
+                    shared = my_ids & leader_ids
+                    leader_only = leader_ids - my_ids
+                    my_only = my_ids - leader_ids
+                    overlap_pct = len(shared) / 15 * 100
 
-                    if st.button("🔄 Load rival squads (differentials & effective ownership)"):
-                        rival_picks = {}
-                        for rival in rivals:
-                            try:
-                                data = get_entry_picks(rival["entry"], current_gw)
-                                rival_picks[rival["entry"]] = data.get("picks", [])
-                            except Exception:
-                                continue
-                        st.session_state["rival_cache_key"] = cache_key
-                        st.session_state["rival_picks"] = rival_picks
-
-                    if st.session_state.get("rival_cache_key") != cache_key:
-                        st.info(
-                            "Click the button above to fetch rival squads. "
-                            "This makes several live API calls, so it's opt-in "
-                            "rather than automatic."
-                        )
-                    else:
-                        rival_picks = st.session_state["rival_picks"]
-                        my_ids = {p["id"] for p in my_squad}
-
-                        st.subheader("Effective ownership within this league")
-                        st.caption(
-                            f"Captaincy-weighted ownership across the top {len(rival_picks)} "
-                            "teams in your league — a player owned AND captained widely is a "
-                            "much bigger risk/reward than raw ownership shows."
-                        )
-
-                        eo_counts = defaultdict(float)
-                        for entry, picks in rival_picks.items():
-                            for pick in picks:
-                                weight = pick.get("multiplier", 1)
-                                eo_counts[pick["element"]] += weight
-
-                        eo_rows = []
-                        for pid, weight in sorted(eo_counts.items(), key=lambda x: x[1], reverse=True)[:15]:
+                    st.write(f"Squad overlap: **{overlap_pct:.0f}%**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**Your differentials**")
+                        for pid in my_only:
                             p = player_by_id.get(pid)
                             if p:
-                                eo_rows.append({
-                                    "Player": p["name"],
-                                    "Effective Ownership (weighted)": round(weight / max(len(rival_picks), 1) * 100, 1),
-                                    "In Your Squad": "✅" if pid in my_ids else "—",
-                                })
-                        st.dataframe(pd.DataFrame(eo_rows), use_container_width=True, hide_index=True)
-
-                        st.divider()
-                        st.subheader("Full rival differential matrix")
-
-                        matrix_rows = []
-                        for rival in rivals:
-                            rival_ids = {pick["id"] for pick in [
-                                {"id": pick["element"]} for pick in rival_picks.get(rival["entry"], [])
-                            ]}
-                            overlap = len(my_ids & rival_ids)
-                            matrix_rows.append({
-                                "Rival": rival["player_name"],
-                                "Rank": rival["rank"],
-                                "Total Points": rival["total"],
-                                "Squad Overlap": f"{overlap}/15",
-                                "Differentials (theirs)": len(rival_ids - my_ids),
-                            })
-                        st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True, hide_index=True)
-
-                        st.divider()
-                        st.subheader(f"Head-to-head vs {leader['player_name']} (leader)")
-
-                        leader_ids = {pick["element"] for pick in rival_picks.get(leader["entry"], [])}
-                        shared = my_ids & leader_ids
-                        leader_only = leader_ids - my_ids
-                        my_only = my_ids - leader_ids
-                        overlap_pct = len(shared) / 15 * 100
-
-                        st.write(f"Squad overlap: **{overlap_pct:.0f}%**")
-
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown("**Your differentials**")
-                            for pid in my_only:
-                                p = player_by_id.get(pid)
-                                if p:
-                                    st.write(f"• {p['name']} — {p['points']} pts")
-                        with col2:
-                            st.markdown("**Leader's differentials**")
-                            for pid in leader_only:
-                                p = player_by_id.get(pid)
-                                if p:
-                                    st.write(f"• {p['name']} — {p['points']} pts")
-                else:
-                    st.warning("Your Team ID wasn't found in this league.")
-
+                                st.write(f"• {p['name']} — {p['points']} pts")
+                    with col2:
+                        st.markdown("**Leader's differentials**")
+                        for pid in leader_only:
+                            p = player_by_id.get(pid)
+                            if p:
+                                st.write(f"• {p['name']} — {p['points']} pts")
         except Exception:
             st.error("Couldn't load the mini-league.")
-
 
 # ============================================================
 # TAB 9 — BEST XI (opt-in)
 # ============================================================
-
 with tabs[8]:
     st.header("🏆 Best XI From Your Squad")
     st.caption(
         "Finds the highest-scoring valid formation from your 15 players. "
         "This does not change your actual FPL lineup — it's a suggestion."
     )
-
     if not my_squad:
         st.info("Load your FPL team first.")
     elif st.button("Calculate Best XI"):
@@ -1353,25 +1177,26 @@ with tabs[8]:
             st.warning("Couldn't build a valid XI from this squad.")
         else:
             st.success(f"Best formation: **{result['formation']}** (total score: {score:.1f})")
-
             lineup_rows = [{
-                "Player": p["name"], "Pos": p["position"], "Club": p["team"],
-                "FPL Points": p["points"], "Blended Score": round(blended_score(p), 1),
+                "Player": p["name"],
+                "Pos": p["position"],
+                "Club": p["team"],
+                "FPL Points": p["points"],
+                "Blended Score": round(blended_score(p), 1),
             } for p in result["lineup"]]
             st.dataframe(pd.DataFrame(lineup_rows), use_container_width=True, hide_index=True)
 
             st.subheader("Bench (in order)")
             bench_rows = [{
-                "Player": p["name"], "Pos": p["position"],
+                "Player": p["name"],
+                "Pos": p["position"],
                 "Blended Score": round(blended_score(p), 1),
             } for p in sorted(result["bench"], key=blended_score, reverse=True)]
             st.dataframe(pd.DataFrame(bench_rows), use_container_width=True, hide_index=True)
 
-
 # ============================================================
 # TAB 10 — WILDCARD REBUILD (opt-in)
 # ============================================================
-
 with tabs[9]:
     st.header("🛠️ Wildcard Rebuild Suggestion")
     st.caption(
@@ -1379,73 +1204,81 @@ with tabs[9]:
         "3-per-club rule, maximising blended score. Greedy, not exhaustive — "
         "treat this as a strong starting point to refine manually, not a final answer."
     )
-
     if st.button("Suggest a Wildcard squad"):
         squad, leftover = wildcard_rebuild()
-
         if len(squad) < 15:
             st.warning(
                 f"Only found {len(squad)}/15 players within budget constraints — "
                 "try refining manually from this partial squad."
             )
-
         total_cost = SQUAD_BUDGET / 10 - leftover
         st.metric("Squad cost", f"£{total_cost:.1f}m")
         st.metric("Money left in bank", f"£{leftover:.1f}m")
 
         rows = [{
-            "Player": p["name"], "Pos": p["position"], "Club": p["team"],
-            "Price": f"£{p['price']:.1f}m", "FPL Points": p["points"],
-            "Form": round(p["form"], 1), "Blended Score": round(blended_score(p), 1),
+            "Player": p["name"],
+            "Pos": p["position"],
+            "Club": p["team"],
+            "Price": f"£{p['price']:.1f}m",
+            "FPL Points": p["points"],
+            "Form": round(p["form"], 1),
+            "Blended Score": round(blended_score(p), 1),
         } for p in sorted(squad, key=lambda p: (p["position"], -blended_score(p)))]
-
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # ==============================================================================
+# ==============================================================================
 # TAB 11 - AI ASSISTANT
 # ==============================================================================
-
 with tabs[10]:
-  st.header("💬 FPL AI Assistant")
+    st.header("💬 FPL AI Assistant")
 
-  client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    if "GEMINI_API_KEY" not in st.secrets:
+        st.warning("GEMINI_API_KEY not found in Streamlit Secrets. Please add it in App Settings -> Secrets.")
+    else:
+        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-  if "chat_session" not in st.session_state:
-    st.session_state.chat_session = client.chats.create(
-        model="gemini-2.5-flash",
-        config={
-            "system_instruction": (
-                "You are an expert Fantasy Premier League (FPL) assistant. "
-                "Provide sharp, data-driven advice on transfers, captaincy, "
-                "fixtures, and chip strategy."
-            )
-        },
-    )
-    st.session_state.messages = []
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
 
-  for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-      st.markdown(msg["content"])
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-  if prompt := st.chat_input("Ask about transfers, captain picks, or form..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-      st.markdown(prompt)
+        if prompt := st.chat_input("Ask about captain picks, transfer strategy, or form..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-    with st.chat_message("assistant"):
-      response = st.session_state.chat_session.send_message(prompt)
-      st.markdown(response.text)
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing FPL data..."):
+                    try:
+                        # Append active squad context if available
+                        context = ""
+                        if my_squad:
+                            squad_summary = ", ".join([f"{p['name']} ({p['team']})" for p in my_squad])
+                            context = f"Manager's Current Squad: {squad_summary}\n\n"
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": response.text}
-    )
+                        full_prompt = f"{context}User Question: {prompt}"
 
-
+                        response = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=full_prompt,
+                            config={
+                                "system_instruction": (
+                                    "You are an expert Fantasy Premier League (FPL) strategist. "
+                                    "Provide direct, data-driven advice on transfers, captaincy, "
+                                    "fixtures, and chip strategy."
+                                )
+                            },
+                        )
+                        st.markdown(response.text)
+                        st.session_state.messages.append({"role": "assistant", "content": response.text})
+                    except Exception as e:
+                        st.error(f"Error calling Gemini: {e}")
 
 # ============================================================
 # FOOTER
 # ============================================================
-
 st.divider()
 st.caption("⚽ FPL Assistant Manager — ultimate version")
 st.caption(
