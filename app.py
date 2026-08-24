@@ -47,20 +47,6 @@ VALID_FORMATIONS = [
 # API FUNCTIONS
 # ============================================================
 
-@st.cache_data(ttl=900, show_spinner=False)
-def get_bootstrap():
-    r = requests.get(f"{API}/bootstrap-static/", headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def get_fixtures():
-    r = requests.get(f"{API}/fixtures/", headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_entry_info(entry_id):
     r = requests.get(f"{API}/entry/{entry_id}/", headers=HEADERS, timeout=15)
@@ -103,36 +89,10 @@ def get_live_gw(gameweek):
 
 
 # ============================================================
-# LOAD DATA
+# PURE HELPER FUNCTIONS
+# (defined before the cached loader so it can call them —
+# these are cheap and don't need their own caching)
 # ============================================================
-
-try:
-    bootstrap = get_bootstrap()
-    fixtures = get_fixtures()
-except Exception:
-    st.error("⚠️ FPL data could not be loaded.")
-    st.info("The official FPL API may be temporarily unavailable. Try refreshing.")
-    st.stop()
-
-
-# ============================================================
-# BASIC DATA
-# ============================================================
-
-events = bootstrap.get("events", [])
-raw_players = bootstrap.get("elements", [])
-raw_teams = bootstrap.get("teams", [])
-
-teams = {t["id"]: t for t in raw_teams}
-team_names = {t["id"]: t.get("short_name", "?") for t in raw_teams}
-positions = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-
-current_event = next((e for e in events if e.get("is_current")), None)
-next_event = next((e for e in events if e.get("is_next")), None)
-
-current_gw = current_event["id"] if current_event else 1
-next_gw = next_event["id"] if next_event else current_gw + 1
-
 
 def num(value, default=0.0):
     try:
@@ -142,117 +102,6 @@ def num(value, default=0.0):
     except Exception:
         return default
 
-
-# ============================================================
-# FIXTURE ENGINE
-# ============================================================
-
-def build_fixture_map():
-    result = defaultdict(list)
-    for fixture in fixtures:
-        gw = fixture.get("event")
-        if gw is None or gw < next_gw or gw > next_gw + FIXTURE_HORIZON - 1:
-            continue
-        home = fixture.get("team_h")
-        away = fixture.get("team_a")
-        if home:
-            result[home].append({
-                "gw": gw, "home": True, "opponent": away,
-                "difficulty": fixture.get("team_h_difficulty", 3)
-            })
-        if away:
-            result[away].append({
-                "gw": gw, "home": False, "opponent": home,
-                "difficulty": fixture.get("team_a_difficulty", 3)
-            })
-    return result
-
-
-fixture_map = build_fixture_map()
-
-
-def fixture_count(team_id, gw):
-    return len([f for f in fixture_map.get(team_id, []) if f["gw"] == gw])
-
-
-def average_fdr(team_id):
-    games = fixture_map.get(team_id, [])
-    if not games:
-        return 3.0
-    return sum(f["difficulty"] for f in games) / len(games)
-
-
-def fixture_text(team_id, number=5):
-    games = sorted(fixture_map.get(team_id, []), key=lambda x: (x["gw"], not x["home"]))[:number]
-    out = []
-    for f in games:
-        opponent = team_names.get(f["opponent"], "?")
-        location = "H" if f["home"] else "A"
-        out.append(f"GW{f['gw']} {opponent} ({location}) [{f['difficulty']}]")
-    return " | ".join(out) if out else "No fixtures"
-
-
-# ============================================================
-# PLAYER DATABASE
-# ============================================================
-
-players = []
-
-for p in raw_players:
-    team_id = p["team"]
-    chance = p.get("chance_of_playing_next_round")
-    if chance is None:
-        chance = 100
-
-    transfers_in = p.get("transfers_in_event", 0)
-    transfers_out = p.get("transfers_out_event", 0)
-    net_transfers = transfers_in - transfers_out
-
-    player = {
-        "id": p["id"],
-        "name": p.get("web_name", "?"),
-        "full_name": f"{p.get('first_name', '')} {p.get('second_name', '')}".strip(),
-        "position": positions.get(p.get("element_type"), "?"),
-        "team_id": team_id,
-        "team": team_names.get(team_id, "?"),
-        "price": p.get("now_cost", 0) / 10,
-        "points": p.get("total_points", 0),
-        "ppg": num(p.get("points_per_game")),
-        "form": num(p.get("form")),
-        "minutes": p.get("minutes", 0),
-        "goals": p.get("goals_scored", 0),
-        "assists": p.get("assists", 0),
-        "clean_sheets": p.get("clean_sheets", 0),
-        "bonus": p.get("bonus", 0),
-        "bps": p.get("bps", 0),
-        "ep_next": num(p.get("ep_next")),
-        "ep_this": num(p.get("ep_this")),
-        "ownership": num(p.get("selected_by_percent")),
-        "chance": chance,
-        "status": p.get("status", "a"),
-        "news": p.get("news", ""),
-        "xgi90": num(p.get("expected_goal_involvements_per_90")),
-        "xgc90": num(p.get("expected_goals_conceded_per_90")),
-        "ict": num(p.get("ict_index")),
-        "transfers_in": transfers_in,
-        "transfers_out": transfers_out,
-        "net_transfers": net_transfers,
-        "price_change": p.get("cost_change_event", 0),
-        "price_change_overall": p.get("cost_change_start", 0),
-    }
-
-    player["fdr"] = average_fdr(team_id)
-    player["next_gw_fixtures"] = fixture_count(team_id, next_gw)
-    player["fixtures"] = fixture_text(team_id, FIXTURE_HORIZON)
-
-    players.append(player)
-
-player_by_id = {p["id"]: p for p in players}
-
-
-# ============================================================
-# PLAYER SCORING
-# ============================================================
 
 def availability_factor(player):
     chance = player["chance"]
@@ -267,9 +116,11 @@ def availability_factor(player):
     return 0
 
 
-def blended_score(player):
+def calc_blended_score(player):
     """Ranking score, not a points prediction. Actual points earned
-    remain the biggest single component by design."""
+    remain the biggest single component by design. This is the ONE
+    place this math happens — it's computed once per player inside
+    the cached loader below, not recomputed on every rerun."""
     actual_points = player["points"]
     ppg_component = min(player["ppg"] * 2.0, 15)
     form_component = min(player["form"] * 1.5, 12)
@@ -279,8 +130,6 @@ def blended_score(player):
     dgw_bonus = 8 if player["next_gw_fixtures"] >= 2 else 0
     bgw_penalty = 20 if player["next_gw_fixtures"] == 0 else 0
 
-    # Defenders/GKs get a small boost for low expected goals conceded —
-    # clean sheet potential wasn't otherwise represented.
     defensive_component = 0
     if player["position"] in ("GK", "DEF") and player["xgc90"] > 0:
         defensive_component = max(0, (1.3 - player["xgc90"]) * 4)
@@ -293,10 +142,10 @@ def blended_score(player):
     )
 
 
-def multi_gw_projection(player, weeks=HIT_PROJECTION_WEEKS):
-    """Rough projected points over the next N gameweeks, blending
-    official ep_next with recent form and fixture ease. This is what
-    a hit's cost should be weighed against — not a single GW swing."""
+def calc_multi_gw_projection(player, fixture_map, weeks=HIT_PROJECTION_WEEKS):
+    """Rough projected points over the next N gameweeks. Also computed
+    once at load time and cached — it's only ever called with the
+    default `weeks` value elsewhere in the app."""
     games = sorted(fixture_map.get(player["team_id"], []), key=lambda x: x["gw"])[:weeks]
     if not games:
         return player["ep_next"]
@@ -322,6 +171,178 @@ def price_momentum_flag(player):
     if ratio < -0.4:
         return "📉 Likely to fall"
     return "— Stable"
+
+
+def fixture_count(fixture_map, team_id, gw):
+    return len([f for f in fixture_map.get(team_id, []) if f["gw"] == gw])
+
+
+def average_fdr(fixture_map, team_id):
+    games = fixture_map.get(team_id, [])
+    if not games:
+        return 3.0
+    return sum(f["difficulty"] for f in games) / len(games)
+
+
+def fixture_text(fixture_map, team_names, team_id, number=5):
+    games = sorted(fixture_map.get(team_id, []), key=lambda x: (x["gw"], not x["home"]))[:number]
+    out = []
+    for f in games:
+        opponent = team_names.get(f["opponent"], "?")
+        location = "H" if f["home"] else "A"
+        out.append(f"GW{f['gw']} {opponent} ({location}) [{f['difficulty']}]")
+    return " | ".join(out) if out else "No fixtures"
+
+
+# ============================================================
+# CACHED DATA LOADER
+#
+# THE key efficiency fix: bootstrap, fixtures, the fixture map,
+# AND the full 700-player database (with blended_score and the
+# multi-GW projection precomputed) are all built ONCE inside a
+# single cached function. Streamlit reruns the whole script on
+# every click, but this entire block is skipped on every rerun
+# until the 15-minute cache expires — instead of rebuilding ~700
+# players and recalculating scores on every single interaction.
+# ============================================================
+
+@st.cache_data(ttl=900, show_spinner="Loading FPL data...")
+def load_fpl_data():
+    r = requests.get(f"{API}/bootstrap-static/", headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    bootstrap = r.json()
+
+    r = requests.get(f"{API}/fixtures/", headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    fixtures_raw = r.json()
+
+    events = bootstrap.get("events", [])
+    raw_players = bootstrap.get("elements", [])
+    raw_teams = bootstrap.get("teams", [])
+
+    teams = {t["id"]: t for t in raw_teams}
+    team_names = {t["id"]: t.get("short_name", "?") for t in raw_teams}
+    positions = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+    current_event = next((e for e in events if e.get("is_current")), None)
+    next_event = next((e for e in events if e.get("is_next")), None)
+    current_gw = current_event["id"] if current_event else 1
+    next_gw = next_event["id"] if next_event else current_gw + 1
+
+    fixture_map = defaultdict(list)
+    for fixture in fixtures_raw:
+        gw = fixture.get("event")
+        if gw is None or gw < next_gw or gw > next_gw + FIXTURE_HORIZON - 1:
+            continue
+        home = fixture.get("team_h")
+        away = fixture.get("team_a")
+        if home:
+            fixture_map[home].append({
+                "gw": gw, "home": True, "opponent": away,
+                "difficulty": fixture.get("team_h_difficulty", 3)
+            })
+        if away:
+            fixture_map[away].append({
+                "gw": gw, "home": False, "opponent": home,
+                "difficulty": fixture.get("team_a_difficulty", 3)
+            })
+
+    players = []
+    for p in raw_players:
+        team_id = p["team"]
+        chance = p.get("chance_of_playing_next_round")
+        if chance is None:
+            chance = 100
+
+        transfers_in = p.get("transfers_in_event", 0)
+        transfers_out = p.get("transfers_out_event", 0)
+
+        player = {
+            "id": p["id"],
+            "name": p.get("web_name", "?"),
+            "full_name": f"{p.get('first_name', '')} {p.get('second_name', '')}".strip(),
+            "position": positions.get(p.get("element_type"), "?"),
+            "team_id": team_id,
+            "team": team_names.get(team_id, "?"),
+            "price": p.get("now_cost", 0) / 10,
+            "points": p.get("total_points", 0),
+            "ppg": num(p.get("points_per_game")),
+            "form": num(p.get("form")),
+            "minutes": p.get("minutes", 0),
+            "goals": p.get("goals_scored", 0),
+            "assists": p.get("assists", 0),
+            "clean_sheets": p.get("clean_sheets", 0),
+            "bonus": p.get("bonus", 0),
+            "bps": p.get("bps", 0),
+            "ep_next": num(p.get("ep_next")),
+            "ep_this": num(p.get("ep_this")),
+            "ownership": num(p.get("selected_by_percent")),
+            "chance": chance,
+            "status": p.get("status", "a"),
+            "news": p.get("news", ""),
+            "xgi90": num(p.get("expected_goal_involvements_per_90")),
+            "xgc90": num(p.get("expected_goals_conceded_per_90")),
+            "ict": num(p.get("ict_index")),
+            "transfers_in": transfers_in,
+            "transfers_out": transfers_out,
+            "net_transfers": transfers_in - transfers_out,
+            "price_change": p.get("cost_change_event", 0),
+            "price_change_overall": p.get("cost_change_start", 0),
+        }
+
+        player["fdr"] = average_fdr(fixture_map, team_id)
+        player["next_gw_fixtures"] = fixture_count(fixture_map, team_id, next_gw)
+        player["fixtures"] = fixture_text(fixture_map, team_names, team_id, FIXTURE_HORIZON)
+
+        # Precompute the two expensive-ish derived scores ONCE here,
+        # rather than every time a table is sorted or filtered.
+        player["blended"] = calc_blended_score(player)
+        player["projection_4gw"] = calc_multi_gw_projection(player, fixture_map)
+
+        players.append(player)
+
+    player_by_id = {p["id"]: p for p in players}
+
+    return {
+        "bootstrap": bootstrap,
+        "teams": teams,
+        "team_names": team_names,
+        "current_gw": current_gw,
+        "next_gw": next_gw,
+        "fixture_map": dict(fixture_map),
+        "players": players,
+        "player_by_id": player_by_id,
+    }
+
+
+try:
+    _data = load_fpl_data()
+except Exception:
+    st.error("⚠️ FPL data could not be loaded.")
+    st.info("The official FPL API may be temporarily unavailable. Try refreshing.")
+    st.stop()
+
+teams = _data["teams"]
+team_names = _data["team_names"]
+current_gw = _data["current_gw"]
+next_gw = _data["next_gw"]
+fixture_map = _data["fixture_map"]
+players = _data["players"]
+player_by_id = _data["player_by_id"]
+
+
+def blended_score(player):
+    """Thin lookup — the real calculation ran once inside load_fpl_data()."""
+    return player["blended"]
+
+
+def multi_gw_projection(player, weeks=HIT_PROJECTION_WEEKS):
+    """Thin lookup for the default window (the only way this is ever
+    called elsewhere in the app). Falls back to a live calc only if
+    someone passes a non-default `weeks`."""
+    if weeks == HIT_PROJECTION_WEEKS:
+        return player["projection_4gw"]
+    return calc_multi_gw_projection(player, fixture_map, weeks=weeks)
 
 
 # ============================================================
@@ -1098,8 +1119,8 @@ with tabs[5]:
     for team_id, team in teams.items():
         fixture_rows.append({
             "Team": team.get("short_name", "?"),
-            "Average FDR": round(average_fdr(team_id), 2),
-            "Fixtures": fixture_text(team_id, FIXTURE_HORIZON),
+            "Average FDR": round(average_fdr(fixture_map, team_id), 2),
+            "Fixtures": fixture_text(fixture_map, team_names, team_id, FIXTURE_HORIZON),
         })
 
     fixture_df = pd.DataFrame(fixture_rows).sort_values("Average FDR")
@@ -1109,7 +1130,7 @@ with tabs[5]:
 
     dgw_teams, bgw_teams = [], []
     for team_id in teams:
-        count = fixture_count(team_id, next_gw)
+        count = fixture_count(fixture_map, team_id, next_gw)
         if count >= 2:
             dgw_teams.append(team_names[team_id])
         elif count == 0:
@@ -1205,85 +1226,105 @@ with tabs[7]:
 
                     st.divider()
 
-                    # Pull picks for every rival in the league (top 10 to
-                    # keep this fast) to build a full differential + EO view.
+                    # This is the other big efficiency fix: pulling picks
+                    # for 10 rivals is 10 sequential API calls. Streamlit
+                    # reruns this whole tab block on EVERY interaction
+                    # anywhere in the app (not just clicks in this tab),
+                    # so leaving this automatic meant 10 live requests
+                    # firing on every rerun the moment a league ID was
+                    # entered. Gate it behind a button and cache the
+                    # result in session_state, keyed to this league+GW,
+                    # so it only re-fetches when you actually ask it to.
+                    cache_key = f"{league_id}_{current_gw}"
                     rivals = standings[:10]
-                    rival_picks = {}
-                    for rival in rivals:
-                        try:
-                            data = get_entry_picks(rival["entry"], current_gw)
-                            rival_picks[rival["entry"]] = data.get("picks", [])
-                        except Exception:
-                            continue
 
-                    my_ids = {p["id"] for p in my_squad}
+                    if st.button("🔄 Load rival squads (differentials & effective ownership)"):
+                        rival_picks = {}
+                        for rival in rivals:
+                            try:
+                                data = get_entry_picks(rival["entry"], current_gw)
+                                rival_picks[rival["entry"]] = data.get("picks", [])
+                            except Exception:
+                                continue
+                        st.session_state["rival_cache_key"] = cache_key
+                        st.session_state["rival_picks"] = rival_picks
 
-                    st.subheader("Effective ownership within this league")
-                    st.caption(
-                        f"Captaincy-weighted ownership across the top {len(rival_picks)} "
-                        "teams in your league — a player owned AND captained widely is a "
-                        "much bigger risk/reward than raw ownership shows."
-                    )
+                    if st.session_state.get("rival_cache_key") != cache_key:
+                        st.info(
+                            "Click the button above to fetch rival squads. "
+                            "This makes several live API calls, so it's opt-in "
+                            "rather than automatic."
+                        )
+                    else:
+                        rival_picks = st.session_state["rival_picks"]
+                        my_ids = {p["id"] for p in my_squad}
 
-                    eo_counts = defaultdict(float)
-                    for entry, picks in rival_picks.items():
-                        for pick in picks:
-                            weight = pick.get("multiplier", 1)
-                            eo_counts[pick["element"]] += weight
+                        st.subheader("Effective ownership within this league")
+                        st.caption(
+                            f"Captaincy-weighted ownership across the top {len(rival_picks)} "
+                            "teams in your league — a player owned AND captained widely is a "
+                            "much bigger risk/reward than raw ownership shows."
+                        )
 
-                    eo_rows = []
-                    for pid, weight in sorted(eo_counts.items(), key=lambda x: x[1], reverse=True)[:15]:
-                        p = player_by_id.get(pid)
-                        if p:
-                            eo_rows.append({
-                                "Player": p["name"],
-                                "Effective Ownership (weighted)": round(weight / max(len(rival_picks), 1) * 100, 1),
-                                "In Your Squad": "✅" if pid in my_ids else "—",
+                        eo_counts = defaultdict(float)
+                        for entry, picks in rival_picks.items():
+                            for pick in picks:
+                                weight = pick.get("multiplier", 1)
+                                eo_counts[pick["element"]] += weight
+
+                        eo_rows = []
+                        for pid, weight in sorted(eo_counts.items(), key=lambda x: x[1], reverse=True)[:15]:
+                            p = player_by_id.get(pid)
+                            if p:
+                                eo_rows.append({
+                                    "Player": p["name"],
+                                    "Effective Ownership (weighted)": round(weight / max(len(rival_picks), 1) * 100, 1),
+                                    "In Your Squad": "✅" if pid in my_ids else "—",
+                                })
+                        st.dataframe(pd.DataFrame(eo_rows), use_container_width=True, hide_index=True)
+
+                        st.divider()
+                        st.subheader("Full rival differential matrix")
+
+                        matrix_rows = []
+                        for rival in rivals:
+                            rival_ids = {pick["id"] for pick in [
+                                {"id": pick["element"]} for pick in rival_picks.get(rival["entry"], [])
+                            ]}
+                            overlap = len(my_ids & rival_ids)
+                            matrix_rows.append({
+                                "Rival": rival["player_name"],
+                                "Rank": rival["rank"],
+                                "Total Points": rival["total"],
+                                "Squad Overlap": f"{overlap}/15",
+                                "Differentials (theirs)": len(rival_ids - my_ids),
                             })
-                    st.dataframe(pd.DataFrame(eo_rows), use_container_width=True, hide_index=True)
+                        st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True, hide_index=True)
 
-                    st.divider()
-                    st.subheader("Full rival differential matrix")
+                        st.divider()
+                        st.subheader(f"Head-to-head vs {leader['player_name']} (leader)")
 
-                    matrix_rows = []
-                    for rival in rivals:
-                        rival_ids = {pick["id"] for pick in [
-                            {"id": pick["element"]} for pick in rival_picks.get(rival["entry"], [])
-                        ]}
-                        overlap = len(my_ids & rival_ids)
-                        matrix_rows.append({
-                            "Rival": rival["player_name"],
-                            "Rank": rival["rank"],
-                            "Total Points": rival["total"],
-                            "Squad Overlap": f"{overlap}/15",
-                            "Differentials (theirs)": len(rival_ids - my_ids),
-                        })
-                    st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True, hide_index=True)
+                        leader_ids = {pick["element"] for pick in rival_picks.get(leader["entry"], [])}
+                        shared = my_ids & leader_ids
+                        leader_only = leader_ids - my_ids
+                        my_only = my_ids - leader_ids
+                        overlap_pct = len(shared) / 15 * 100
 
-                    st.divider()
-                    st.subheader(f"Head-to-head vs {leader['player_name']} (leader)")
+                        st.write(f"Squad overlap: **{overlap_pct:.0f}%**")
 
-                    leader_ids = {pick["element"] for pick in rival_picks.get(leader["entry"], [])}
-                    shared = my_ids & leader_ids
-                    leader_only = leader_ids - my_ids
-                    my_only = my_ids - leader_ids
-                    overlap_pct = len(shared) / 15 * 100
-
-                    st.write(f"Squad overlap: **{overlap_pct:.0f}%**")
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.markdown("**Your differentials**")
-                        for pid in my_only:
-                            p = player_by_id.get(pid)
-                            if p:
-                                st.write(f"• {p['name']} — {p['points']} pts")
-                    with col2:
-                        st.markdown("**Leader's differentials**")
-                        for pid in leader_only:
-                            p = player_by_id.get(pid)
-                            if p:
-                                st.write(f"• {p['name']} — {p['points']} pts")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("**Your differentials**")
+                            for pid in my_only:
+                                p = player_by_id.get(pid)
+                                if p:
+                                    st.write(f"• {p['name']} — {p['points']} pts")
+                        with col2:
+                            st.markdown("**Leader's differentials**")
+                            for pid in leader_only:
+                                p = player_by_id.get(pid)
+                                if p:
+                                    st.write(f"• {p['name']} — {p['points']} pts")
                 else:
                     st.warning("Your Team ID wasn't found in this league.")
 
