@@ -802,7 +802,7 @@ Task:
 """
                     try:
                         resp = client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="3.6-flash",
                             contents=prompt,
                             config={"system_instruction": "You are an objective FPL analyst testing creator advice against Opta data."}
                         )
