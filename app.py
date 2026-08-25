@@ -433,22 +433,41 @@ def best_xi(squad):
 # ============================================================
 # YOUTUBE TRANSCRIPT EXTRACTOR
 # ============================================================
+# ============================================================
+# YOUTUBE TRANSCRIPT EXTRACTOR
+# ============================================================
 def extract_video_id(url_or_id):
-    if len(url_or_id) == 11 and " " not in url_or_id:
-        return url_or_id
-    match = re.search(r"(?:v=|\/|youtu\.be\/|embed\/)([0-9A-Za-z_-]{11})", url_or_id)
-    return match.group(1) if match else None
+  if len(url_or_id) == 11 and " " not in url_or_id:
+    return url_or_id
+  match = re.search(
+      r"(?:v=|\/|youtu\.be\/|embed\/)([0-9A-Za-z_-]{11})", url_or_id
+  )
+  return match.group(1) if match else None
+
 
 def fetch_youtube_transcript(video_identifier):
-    vid = extract_video_id(video_identifier)
-    if not vid:
-        return None, "Invalid YouTube URL or Video ID format."
-    try:
-        transcript_data = YouTubeTranscriptApi.get_transcript(vid)
-        full_text = " ".join([snippet["text"] for snippet in transcript_data])
-        return full_text, None
-    except Exception as e:
-        return None, f"Could not retrieve transcript: {e}"
+  vid = extract_video_id(video_identifier)
+  if not vid:
+    return None, "Invalid YouTube URL or Video ID format."
+  try:
+    if hasattr(YouTubeTranscriptApi, "get_transcript"):
+      transcript_data = YouTubeTranscriptApi.get_transcript(vid)
+    else:
+      ytt = YouTubeTranscriptApi()
+      transcript_data = ytt.fetch(vid)
+
+    lines = []
+    for snippet in transcript_data:
+      if isinstance(snippet, dict):
+        lines.append(snippet.get("text", ""))
+      else:
+        lines.append(getattr(snippet, "text", str(snippet)))
+
+    full_text = " ".join(lines)
+    return full_text, None
+  except Exception as e:
+    return None, f"Could not retrieve transcript: {e}"
+
 
 # ============================================================
 # UI HEADER & SIDEBAR
