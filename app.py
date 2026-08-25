@@ -6,11 +6,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-
-# ============================================================
-# OPTIONAL DEPENDENCIES
-# ============================================================
-
+# Optional dependencies
 try:
     from google import genai
     from google.genai import types
@@ -36,16 +32,13 @@ st.set_page_config(
 
 
 # ============================================================
-# SETTINGS
+# CONFIGURATION
 # ============================================================
 
 API = "https://fantasy.premierleague.com/api"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/139 Safari/537.36"
-    )
+    "User-Agent": "Mozilla/5.0 FPL Assistant Manager"
 }
 
 FIXTURE_HORIZON = 5
@@ -72,49 +65,53 @@ GEMINI_MODELS = [
 
 
 # ============================================================
-# 7 ELITE MANAGERS
+# HARD-CODED MANAGER
 # ============================================================
-#
-# These are current publicly listed 2026/27 FPL Team IDs.
-#
-# IMPORTANT:
-# The app still verifies every ID against the live FPL API.
-# If an ID stops working, the app will show FAILED rather
-# than silently following the wrong manager.
-#
+
+MY_TEAMS = {
+    "My FPL Team": 3240706,
+}
+
+
+# ============================================================
+# HARD-CODED MINI-LEAGUES
+# ============================================================
+
+MINI_LEAGUES = {
+    "Lads League": 70818,
+    "IMW": 637276,
+}
+
+
+# ============================================================
+# ELITE MANAGERS
 # ============================================================
 
 ELITE_MANAGERS = {
     "Ben Crellin": {
         "entry_id": 53517,
-        "description": "All-time elite / fixture specialist",
+        "description": "Elite fixture specialist",
     },
-
     "FPL Harry": {
         "entry_id": 3054,
         "description": "Harry Daniels / FPL Harry",
     },
-
     "Andy LTFPL": {
         "entry_id": 41,
         "description": "Let's Talk FPL",
     },
-
     "Tom Dollimore": {
         "entry_id": 179777,
         "description": "FPL Barbossa",
     },
-
     "Pras United": {
         "entry_id": 3315,
         "description": "Long-term elite manager",
     },
-
     "Sam Bonfield": {
         "entry_id": 2977,
         "description": "FPL creator / manager",
     },
-
     "BigMan Bakar": {
         "entry_id": 5133,
         "description": "Data-led FPL manager",
@@ -123,7 +120,7 @@ ELITE_MANAGERS = {
 
 
 # ============================================================
-# YOUTUBE CHANNELS
+# CREATOR CHANNELS
 # ============================================================
 
 CREATOR_CHANNELS = {
@@ -136,92 +133,62 @@ CREATOR_CHANNELS = {
 
 
 # ============================================================
-# BASIC API
+# API
 # ============================================================
 
-@st.cache_data(
-    ttl=300,
-    show_spinner=False,
-)
+@st.cache_data(ttl=300, show_spinner=False)
 def api_get(url):
-
-    response = requests.get(
+    r = requests.get(
         url,
         headers=HEADERS,
         timeout=20,
     )
 
-    response.raise_for_status()
+    r.raise_for_status()
 
-    return response.json()
+    return r.json()
 
 
-@st.cache_data(
-    ttl=900,
-    show_spinner=False,
-)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_entry_info(entry_id):
-
     return api_get(
         f"{API}/entry/{entry_id}/"
     )
 
 
-@st.cache_data(
-    ttl=300,
-    show_spinner=False,
-)
-def get_entry_picks(
-    entry_id,
-    gameweek,
-):
-
+@st.cache_data(ttl=300, show_spinner=False)
+def get_entry_picks(entry_id, gameweek):
     return api_get(
         f"{API}/entry/{entry_id}/event/{gameweek}/picks/"
     )
 
 
-@st.cache_data(
-    ttl=300,
-    show_spinner=False,
-)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_entry_transfers(entry_id):
-
     return api_get(
         f"{API}/entry/{entry_id}/transfers/"
     )
 
 
-@st.cache_data(
-    ttl=300,
-    show_spinner=False,
-)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_league(league_id):
-
     return api_get(
         f"{API}/leagues-classic/{league_id}/standings/"
     )
 
 
-@st.cache_data(
-    ttl=300,
-    show_spinner=False,
-)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_live_gw(gameweek):
-
     data = api_get(
         f"{API}/event/{gameweek}/live/"
     )
 
     return {
-        element["id"]: element.get(
-            "stats",
-            {},
-        ).get(
+        e["id"]: e.get("stats", {}).get(
             "total_points",
             0,
         )
-        for element in data.get(
+        for e in data.get(
             "elements",
             [],
         )
@@ -232,47 +199,36 @@ def get_live_gw(gameweek):
 # HELPERS
 # ============================================================
 
-def num(
-    value,
-    default=0.0,
-):
+def num(v, default=0.0):
 
     try:
 
-        if value is None or value == "":
-            return default
+        return (
+            default
+            if v is None or v == ""
+            else float(v)
+        )
 
-        return float(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
 
         return default
 
 
-def safe_int(
-    value,
-    default=0,
-):
+def safe_int(v, default=0):
 
     try:
 
-        return int(value)
+        return int(v)
 
-    except (
-        TypeError,
-        ValueError,
-    ):
+    except (TypeError, ValueError):
 
         return default
 
 
-def availability_factor(player):
+def availability_factor(p):
 
     chance = num(
-        player.get("chance"),
+        p.get("chance"),
         100,
     )
 
@@ -312,16 +268,18 @@ def average_fdr(
 
         games = games[:weeks]
 
-    if not games:
-        return 3.0
-
-    return sum(
-        num(
-            f["difficulty"],
-            3,
+    return (
+        sum(
+            num(
+                f["difficulty"],
+                3,
+            )
+            for f in games
         )
-        for f in games
-    ) / len(games)
+        / len(games)
+        if games
+        else 3.0
+    )
 
 
 def fixture_count(
@@ -359,48 +317,31 @@ def fixture_text(
     )[:number]
 
     if not games:
+
         return "No fixtures"
 
-    output = []
-
-    for fixture in games:
-
-        opponent = team_names.get(
-            fixture["opponent"],
-            "?",
-        )
-
-        location = (
-            "H"
-            if fixture["home"]
-            else "A"
-        )
-
-        output.append(
-            f"GW{fixture['gw']} "
-            f"{opponent} "
-            f"({location}) "
-            f"[{fixture['difficulty']}]"
-        )
-
-    return " | ".join(output)
-
-
-def price_momentum_flag(player):
-
-    net = num(
-        player.get("net_transfers")
+    return " | ".join(
+        f"GW{f['gw']} "
+        f"{team_names.get(f['opponent'], '?')} "
+        f"({'H' if f['home'] else 'A'}) "
+        f"[{f['difficulty']}]"
+        for f in games
     )
 
-    ownership = max(
+
+def price_momentum_flag(p):
+
+    ratio = (
         num(
-            player.get("ownership")
-        ),
-        0.1,
-    )
-
-    ratio = net / (
-        ownership * 1000
+            p.get("net_transfers")
+        )
+        / max(
+            num(
+                p.get("ownership")
+            ),
+            0.1,
+        )
+        / 1000
     )
 
     if ratio > 0.4:
@@ -416,20 +357,20 @@ def price_momentum_flag(player):
 # PLAYER MODEL
 # ============================================================
 
-def calc_blended_score(player):
+def calc_blended_score(p):
 
     ppg = min(
-        num(player["ppg"]) * 1.5,
+        num(p["ppg"]) * 1.5,
         10,
     )
 
     form = min(
-        num(player["form"]) * 1.2,
+        num(p["form"]) * 1.2,
         9,
     )
 
     expected = min(
-        num(player["ep_next"]) * 2.5,
+        num(p["ep_next"]) * 2.5,
         16,
     )
 
@@ -438,44 +379,43 @@ def calc_blended_score(player):
         (
             3.2
             - num(
-                player["fdr"],
+                p["fdr"],
                 3,
             )
-        ) * 3,
+        )
+        * 3,
     )
 
     availability = (
-        availability_factor(
-            player
-        ) * 5
+        availability_factor(p)
+        * 5
     )
 
     attacking = min(
-        num(player["xgi90"]) * 8,
+        num(p["xgi90"]) * 8,
         12,
     )
 
-    defensive = 0
-
-    if player["position"] in (
-        "GK",
-        "DEF",
-    ):
-
-        defensive = max(
+    defensive = (
+        max(
             0,
             (
                 1.4
                 - num(
-                    player["xgc90"]
+                    p["xgc90"]
                 )
-            ) * 4,
+            )
+            * 4,
         )
+        if p["position"]
+        in ("GK", "DEF")
+        else 0
+    )
 
     dgw_bonus = (
         7
         if safe_int(
-            player["next_gw_fixtures"]
+            p["next_gw_fixtures"]
         ) >= 2
         else 0
     )
@@ -483,7 +423,7 @@ def calc_blended_score(player):
     bgw_penalty = (
         8
         if safe_int(
-            player["next_gw_fixtures"]
+            p["next_gw_fixtures"]
         ) == 0
         else 0
     )
@@ -491,17 +431,13 @@ def calc_blended_score(player):
     ownership_bonus = (
         2
         if (
-            num(
-                player["ownership"]
-            ) < 5
-            and num(
-                player["xgi90"]
-            ) >= 0.25
+            num(p["ownership"]) < 5
+            and num(p["xgi90"]) >= 0.25
         )
         else 0
     )
 
-    score = (
+    return round(
         ppg
         + form
         + expected
@@ -511,24 +447,20 @@ def calc_blended_score(player):
         + defensive
         + dgw_bonus
         + ownership_bonus
-        - bgw_penalty
-    )
-
-    return round(
-        score,
+        - bgw_penalty,
         2,
     )
 
 
 def calc_multi_gw_projection(
-    player,
+    p,
     fixture_map,
     weeks=PROJECTION_WEEKS,
 ):
 
     games = sorted(
         fixture_map.get(
-            player["team_id"],
+            p["team_id"],
             [],
         ),
         key=lambda x: x["gw"],
@@ -537,50 +469,39 @@ def calc_multi_gw_projection(
     if not games:
 
         return round(
-            num(
-                player["ep_next"]
-            ),
+            num(p["ep_next"]),
             1,
         )
 
-    availability = availability_factor(
-        player
-    )
-
     base = (
-        num(
-            player["ep_next"]
-        ) * 0.55
-
-        + num(
-            player["ppg"]
-        ) * 0.20
-
-        + num(
-            player["xgi90"]
-        ) * 2.0
+        num(p["ep_next"]) * 0.55
+        + num(p["ppg"]) * 0.20
+        + num(p["xgi90"]) * 2
     )
 
-    total = 0.0
+    availability = (
+        availability_factor(p)
+    )
 
-    for fixture in games:
+    total = 0
 
-        difficulty = num(
-            fixture["difficulty"],
-            3,
-        )
-
-        multiplier = (
-            1.0
-            + (
-                (3 - difficulty)
-                * 0.08
-            )
-        )
+    for f in games:
 
         total += (
             base
-            * multiplier
+            * (
+                1
+                + (
+                    (
+                        3
+                        - num(
+                            f["difficulty"],
+                            3,
+                        )
+                    )
+                    * 0.08
+                )
+            )
             * availability
         )
 
@@ -647,9 +568,7 @@ def load_fpl_data():
         (
             e
             for e in events
-            if e.get(
-                "is_current"
-            )
+            if e.get("is_current")
         ),
         None,
     )
@@ -658,9 +577,7 @@ def load_fpl_data():
         (
             e
             for e in events
-            if e.get(
-                "is_next"
-            )
+            if e.get("is_next")
         ),
         None,
     )
@@ -668,9 +585,7 @@ def load_fpl_data():
     if current_event:
 
         current_gw = safe_int(
-            current_event.get(
-                "id"
-            ),
+            current_event.get("id"),
             1,
         )
 
@@ -678,11 +593,10 @@ def load_fpl_data():
 
         current_gw = max(
             safe_int(
-                next_event.get(
-                    "id"
-                ),
+                next_event.get("id"),
                 1,
-            ) - 1,
+            )
+            - 1,
             1,
         )
 
@@ -691,60 +605,43 @@ def load_fpl_data():
         current_gw = 1
 
     next_gw = (
-
         safe_int(
-            next_event.get(
-                "id"
-            ),
+            next_event.get("id"),
             current_gw + 1,
         )
-
         if next_event
-
         else current_gw + 1
     )
 
-    fixture_map = defaultdict(
-        list
-    )
+    fixture_map = defaultdict(list)
 
-    for fixture in fixtures_raw:
+    for f in fixtures_raw:
 
-        gw = fixture.get(
-            "event"
-        )
-
-        if gw is None:
-            continue
+        gw = f.get("event")
 
         if (
-            gw < next_gw
+            gw is None
+            or gw < next_gw
             or gw
             > next_gw
             + FIXTURE_HORIZON
             - 1
         ):
+
             continue
 
-        home = fixture.get(
-            "team_h"
-        )
+        h = f.get("team_h")
+        a = f.get("team_a")
 
-        away = fixture.get(
-            "team_a"
-        )
+        if h:
 
-        if home:
-
-            fixture_map[
-                home
-            ].append(
+            fixture_map[h].append(
                 {
                     "gw": safe_int(gw),
                     "home": True,
-                    "opponent": away,
+                    "opponent": a,
                     "difficulty": safe_int(
-                        fixture.get(
+                        f.get(
                             "team_h_difficulty"
                         ),
                         3,
@@ -752,17 +649,15 @@ def load_fpl_data():
                 }
             )
 
-        if away:
+        if a:
 
-            fixture_map[
-                away
-            ].append(
+            fixture_map[a].append(
                 {
                     "gw": safe_int(gw),
                     "home": False,
-                    "opponent": home,
+                    "opponent": h,
                     "difficulty": safe_int(
-                        fixture.get(
+                        f.get(
                             "team_a_difficulty"
                         ),
                         3,
@@ -782,229 +677,232 @@ def load_fpl_data():
             "chance_of_playing_next_round"
         )
 
-        if chance is None:
-            chance = 100
+        chance = (
+            100
+            if chance is None
+            else chance
+        )
 
-        transfers_in = safe_int(
+        ti = safe_int(
             raw.get(
                 "transfers_in_event"
             )
         )
 
-        transfers_out = safe_int(
+        to = safe_int(
             raw.get(
                 "transfers_out_event"
             )
         )
 
-        player = {
+        p = {
 
-            "id": raw.get(
-                "id"
-            ),
+            "id": raw.get("id"),
 
             "name": raw.get(
                 "web_name",
                 "?",
             ),
 
-            "full_name": (
-                f"{raw.get('first_name', '')} "
-                f"{raw.get('second_name', '')}"
-            ).strip(),
+            "full_name":
+                f"{raw.get('first_name','')} "
+                f"{raw.get('second_name','')}"
+                .strip(),
 
-            "position": positions.get(
-                raw.get(
-                    "element_type"
+            "position":
+                positions.get(
+                    raw.get(
+                        "element_type"
+                    ),
+                    "?",
                 ),
-                "?",
-            ),
 
             "team_id": team_id,
 
-            "team": team_names.get(
-                team_id,
-                "?",
-            ),
+            "team":
+                team_names.get(
+                    team_id,
+                    "?",
+                ),
 
-            "price": (
+            "price":
                 num(
                     raw.get(
                         "now_cost"
                     )
-                ) / 10
-            ),
+                ) / 10,
 
-            "points": safe_int(
+            "points":
+                safe_int(
+                    raw.get(
+                        "total_points"
+                    )
+                ),
+
+            "ppg":
+                num(
+                    raw.get(
+                        "points_per_game"
+                    )
+                ),
+
+            "form":
+                num(
+                    raw.get(
+                        "form"
+                    )
+                ),
+
+            "minutes":
+                safe_int(
+                    raw.get(
+                        "minutes"
+                    )
+                ),
+
+            "goals":
+                safe_int(
+                    raw.get(
+                        "goals_scored"
+                    )
+                ),
+
+            "assists":
+                safe_int(
+                    raw.get(
+                        "assists"
+                    )
+                ),
+
+            "clean_sheets":
+                safe_int(
+                    raw.get(
+                        "clean_sheets"
+                    )
+                ),
+
+            "bonus":
+                safe_int(
+                    raw.get(
+                        "bonus"
+                    )
+                ),
+
+            "bps":
+                safe_int(
+                    raw.get(
+                        "bps"
+                    )
+                ),
+
+            "ep_next":
+                num(
+                    raw.get(
+                        "ep_next"
+                    )
+                ),
+
+            "ownership":
+                num(
+                    raw.get(
+                        "selected_by_percent"
+                    )
+                ),
+
+            "chance":
+                num(
+                    chance,
+                    100,
+                ),
+
+            "status":
                 raw.get(
-                    "total_points"
-                )
-            ),
+                    "status",
+                    "a",
+                ),
 
-            "ppg": num(
+            "news":
                 raw.get(
-                    "points_per_game"
-                )
-            ),
+                    "news",
+                    "",
+                ),
 
-            "form": num(
-                raw.get(
-                    "form"
-                )
-            ),
+            "xgi90":
+                num(
+                    raw.get(
+                        "expected_goal_involvements_per_90"
+                    )
+                ),
 
-            "minutes": safe_int(
-                raw.get(
-                    "minutes"
-                )
-            ),
+            "xgc90":
+                num(
+                    raw.get(
+                        "expected_goals_conceded_per_90"
+                    )
+                ),
 
-            "goals": safe_int(
-                raw.get(
-                    "goals_scored"
-                )
-            ),
+            "ict":
+                num(
+                    raw.get(
+                        "ict_index"
+                    )
+                ),
 
-            "assists": safe_int(
-                raw.get(
-                    "assists"
-                )
-            ),
+            "transfers_in": ti,
 
-            "clean_sheets": safe_int(
-                raw.get(
-                    "clean_sheets"
-                )
-            ),
+            "transfers_out": to,
 
-            "bonus": safe_int(
-                raw.get(
-                    "bonus"
-                )
-            ),
+            "net_transfers":
+                ti - to,
 
-            "bps": safe_int(
-                raw.get(
-                    "bps"
-                )
-            ),
-
-            "ep_next": num(
-                raw.get(
-                    "ep_next"
-                )
-            ),
-
-            "ownership": num(
-                raw.get(
-                    "selected_by_percent"
-                )
-            ),
-
-            "chance": num(
-                chance,
-                100,
-            ),
-
-            "status": raw.get(
-                "status",
-                "a",
-            ),
-
-            "news": raw.get(
-                "news",
-                "",
-            ),
-
-            "xgi90": num(
-                raw.get(
-                    "expected_goal_involvements_per_90"
-                )
-            ),
-
-            "xgc90": num(
-                raw.get(
-                    "expected_goals_conceded_per_90"
-                )
-            ),
-
-            "ict": num(
-                raw.get(
-                    "ict_index"
-                )
-            ),
-
-            "transfers_in": transfers_in,
-
-            "transfers_out": transfers_out,
-
-            "net_transfers": (
-                transfers_in
-                - transfers_out
-            ),
-
-            "price_change": safe_int(
-                raw.get(
-                    "cost_change_event"
-                )
-            ),
+            "price_change":
+                safe_int(
+                    raw.get(
+                        "cost_change_event"
+                    )
+                ),
         }
 
-        player["fdr"] = average_fdr(
+        p["fdr"] = average_fdr(
             fixture_map,
             team_id,
         )
 
-        player[
-            "next_gw_fixtures"
-        ] = fixture_count(
+        p["next_gw_fixtures"] = fixture_count(
             fixture_map,
             team_id,
             next_gw,
         )
 
-        player["fixtures"] = fixture_text(
+        p["fixtures"] = fixture_text(
             fixture_map,
             team_names,
             team_id,
             FIXTURE_HORIZON,
         )
 
-        player["blended"] = (
-            calc_blended_score(
-                player
+        p["blended"] = calc_blended_score(
+            p
+        )
+
+        p["projection_4gw"] = (
+            calc_multi_gw_projection(
+                p,
+                fixture_map,
             )
         )
 
-        player[
-            "projection_4gw"
-        ] = calc_multi_gw_projection(
-            player,
-            fixture_map,
-        )
-
-        players.append(
-            player
-        )
+        players.append(p)
 
     return {
-
         "bootstrap": bootstrap,
-
         "teams": teams,
-
         "team_names": team_names,
-
         "current_gw": current_gw,
-
         "next_gw": next_gw,
-
-        "fixture_map": dict(
-            fixture_map
-        ),
-
+        "fixture_map":
+            dict(fixture_map),
         "players": players,
-
         "player_by_id": {
             p["id"]: p
             for p in players
@@ -1015,7 +913,7 @@ def load_fpl_data():
 
 
 # ============================================================
-# LOAD MAIN DATA SAFELY
+# INITIAL DATA LOAD
 # ============================================================
 
 try:
@@ -1037,93 +935,95 @@ except Exception as exc:
 
 teams = DATA["teams"]
 
-team_names = DATA["team_names"]
+team_names = DATA[
+    "team_names"
+]
 
-current_gw = DATA["current_gw"]
+current_gw = DATA[
+    "current_gw"
+]
 
-next_gw = DATA["next_gw"]
+next_gw = DATA[
+    "next_gw"
+]
 
-fixture_map = DATA["fixture_map"]
+fixture_map = DATA[
+    "fixture_map"
+]
 
-players = DATA["players"]
+players = DATA[
+    "players"
+]
 
-player_by_id = DATA["player_by_id"]
+player_by_id = DATA[
+    "player_by_id"
+]
 
 
 # ============================================================
-# PLAYER HELPERS
+# MODEL SHORTCUTS
 # ============================================================
 
-def blended_score(player):
+def blended_score(p):
+    return p["blended"]
 
-    return player["blended"]
 
-
-def multi_gw_projection(player):
-
+def multi_gw_projection(p):
     return calc_multi_gw_projection(
-        player,
+        p,
         fixture_map,
     )
 
 
-def player_status(player):
+def player_status(p):
 
-    if player["status"] != "a":
-
+    if p["status"] != "a":
         return "🔴 Unavailable"
 
-    if player["chance"] < 50:
-
+    if p["chance"] < 50:
         return "🔴 Major doubt"
 
-    if player["chance"] < 75:
-
+    if p["chance"] < 75:
         return "🟠 Rotation risk"
 
-    if player["next_gw_fixtures"] == 0:
-
+    if p["next_gw_fixtures"] == 0:
         return "⚠️ Blank GW"
 
-    if player["next_gw_fixtures"] >= 2:
-
+    if p["next_gw_fixtures"] >= 2:
         return "⚡ Double GW"
 
-    if player["form"] >= 5:
-
+    if p["form"] >= 5:
         return "🟢 In Form"
 
     return "🟡 Normal"
 
 
-def hold_sell(player):
+def hold_sell(p):
 
     if (
-        player["status"] != "a"
-        or player["chance"] < 50
+        p["status"] != "a"
+        or p["chance"] < 50
     ):
 
         return "🔴 SELL / REPLACE"
 
-    if player["chance"] < 75:
-
+    if p["chance"] < 75:
         return "🟠 CONSIDER SELLING"
 
-    if player["next_gw_fixtures"] == 0:
-
+    if p["next_gw_fixtures"] == 0:
         return "🟡 MONITOR — BLANK"
 
     if (
-        player["form"] < 2.5
-        and player["ppg"] < 3
-        and player["minutes"] > 300
+        p["form"] < 2.5
+        and p["ppg"] < 3
+        and p["minutes"] > 300
     ):
 
         return "🔴 SELL"
 
     if (
-        player["form"] >= 5
-        or player["ppg"] >= 5
+        p["form"] >= 5
+        or p["ppg"] >= 5
     ):
 
         return "🟢 STRONG HOLD"
@@ -1132,7 +1032,7 @@ def hold_sell(player):
 
 
 # ============================================================
-# USER TEAM
+# LOAD MY TEAM
 # ============================================================
 
 def load_my_team(entry_id):
@@ -1149,79 +1049,72 @@ def load_my_team(entry_id):
         [],
     ):
 
-        player = player_by_id.get(
-            pick.get(
-                "element"
-            )
+        p = player_by_id.get(
+            pick.get("element")
         )
 
-        if not player:
+        if not p:
             continue
 
-        p = player.copy()
+        p = p.copy()
 
-        p["is_captain"] = bool(
-            pick.get(
-                "is_captain"
-            )
-        )
-
-        p["is_vice"] = bool(
-            pick.get(
-                "is_vice_captain"
-            )
-        )
-
-        p["multiplier"] = safe_int(
-            pick.get(
-                "multiplier"
+        p.update(
+            is_captain=bool(
+                pick.get(
+                    "is_captain"
+                )
             ),
-            1,
-        )
-
-        p["position_slot"] = safe_int(
-            pick.get(
-                "position"
+            is_vice=bool(
+                pick.get(
+                    "is_vice_captain"
+                )
             ),
-            0,
+            multiplier=safe_int(
+                pick.get(
+                    "multiplier"
+                ),
+                1,
+            ),
+            position_slot=safe_int(
+                pick.get(
+                    "position"
+                ),
+                0,
+            ),
         )
 
-        squad.append(
-            p
-        )
+        squad.append(p)
 
     return data, squad
 
+
+# ============================================================
+# TRANSFER MODEL
+# ============================================================
 
 def squad_club_counts(
     squad,
     exclude_id=None,
 ):
 
-    counts = defaultdict(
-        int
-    )
+    counts = defaultdict(int)
 
-    for player in squad:
+    for p in squad:
 
-        if player["id"] == exclude_id:
-            continue
+        if p["id"] != exclude_id:
 
-        counts[
-            player["team_id"]
-        ] += 1
+            counts[
+                p["team_id"]
+            ] += 1
 
     return counts
 
-
-# ============================================================
-# TRANSFERS
-# ============================================================
 
 def transfer_suggestions(
     squad,
     bank,
     free_transfers,
+    elite_rows=None,
 ):
 
     owned_ids = {
@@ -1233,62 +1126,66 @@ def transfer_suggestions(
         squad
     )
 
+    elite_counts = elite_player_counts(
+        elite_rows or []
+    )
+
     suggestions = []
 
     for outgoing in squad:
 
         candidates = [
+
             p
             for p in players
 
             if (
                 p["position"]
                 == outgoing["position"]
-
                 and p["id"]
                 not in owned_ids
-
                 and p["status"]
                 == "a"
-
-                and p["chance"]
-                > 0
+                and p["chance"] > 0
             )
         ]
 
         candidates.sort(
-            key=blended_score,
+            key=lambda p:
+                (
+                    blended_score(p)
+                    + elite_counts.get(
+                        p["id"],
+                        0,
+                    )
+                    * 1.5
+                ),
             reverse=True,
         )
 
-        for incoming in candidates[:50]:
-
-            available = (
-                bank
-                + outgoing["price"]
-            )
+        for incoming in candidates[:60]:
 
             if (
                 incoming["price"]
-                > available
+                > bank
+                + outgoing["price"]
             ):
+
                 continue
 
-            projected_count = (
-                club_counts[
-                    incoming["team_id"]
-                ]
-            )
+            count = club_counts[
+                incoming["team_id"]
+            ]
 
             if (
                 incoming["team_id"]
                 == outgoing["team_id"]
             ):
 
-                projected_count -= 1
+                count -= 1
 
             if (
-                projected_count + 1
+                count + 1
                 > MAX_PER_CLUB
             ):
 
@@ -1298,9 +1195,19 @@ def transfer_suggestions(
                 multi_gw_projection(
                     incoming
                 )
-                -
-                multi_gw_projection(
+                - multi_gw_projection(
                     outgoing
+                )
+            )
+
+            elite_bonus = (
+                elite_counts.get(
+                    incoming["id"],
+                    0,
+                )
+                - elite_counts.get(
+                    outgoing["id"],
+                    0,
                 )
             )
 
@@ -1310,9 +1217,11 @@ def transfer_suggestions(
                 else TRANSFER_HIT
             )
 
-            net_gain = (
+            net = (
                 projected_gain
                 - hit
+                + elite_bonus
+                * 0.25
             )
 
             if (
@@ -1333,20 +1242,21 @@ def transfer_suggestions(
                 {
                     "out": outgoing,
                     "in": incoming,
-                    "projected_gain": projected_gain,
+                    "projected_gain":
+                        projected_gain,
                     "hit": hit,
-                    "net_gain": net_gain,
-                    "cost_difference": (
+                    "net_gain": net,
+                    "cost_difference":
                         incoming["price"]
-                        - outgoing["price"]
-                    ),
+                        - outgoing["price"],
+                    "elite_gain":
+                        elite_bonus,
                 }
             )
 
     suggestions.sort(
-        key=lambda x: x[
-            "net_gain"
-        ],
+        key=lambda x:
+            x["net_gain"],
         reverse=True,
     )
 
@@ -1357,84 +1267,71 @@ def transfer_decision(
     squad,
     bank,
     free_transfers,
+    elite_rows=None,
 ):
 
     suggestions = transfer_suggestions(
         squad,
         bank,
         free_transfers,
+        elite_rows,
     )
 
     if not suggestions:
 
         return {
             "decision": "ROLL",
-            "reason": (
-                "No available transfer clears "
-                "the model's minimum projected-"
-                "improvement threshold."
-            ),
+            "reason":
+                "No available transfer clears the model's minimum improvement threshold.",
             "suggestions": [],
         }
 
-    best = suggestions[0]
+    b = suggestions[0]
 
     if free_transfers > 0:
 
-        if (
-            best["projected_gain"]
-            >= 4.5
-        ):
+        if b["projected_gain"] >= 4.5:
 
-            decision = "TRANSFER"
+            return {
+                "decision": "TRANSFER",
+                "reason":
+                    f"{b['in']['name']} projects "
+                    f"+{b['projected_gain']:.1f} "
+                    f"points over "
+                    f"{PROJECTION_WEEKS} GWs "
+                    f"versus "
+                    f"{b['out']['name']}.",
+                "suggestions":
+                    suggestions,
+            }
 
-            reason = (
-                f"{best['in']['name']} "
-                f"projects "
-                f"+{best['projected_gain']:.1f} "
-                f"points over "
-                f"{PROJECTION_WEEKS} GWs versus "
-                f"{best['out']['name']}."
-            )
+        return {
+            "decision": "ROLL",
+            "reason":
+                "An upgrade exists, but it is not large enough to justify using the transfer.",
+            "suggestions":
+                suggestions,
+        }
 
-        else:
+    if b["net_gain"] >= 2:
 
-            decision = "ROLL"
-
-            reason = (
-                "An upgrade exists, but it is "
-                "not large enough to justify "
-                "using the transfer."
-            )
-
-    else:
-
-        if (
-            best["net_gain"] >= 2
-        ):
-
-            decision = "TAKE HIT"
-
-            reason = (
+        return {
+            "decision": "TAKE HIT",
+            "reason":
                 f"Projected improvement "
-                f"+{best['projected_gain']:.1f}; "
-                f"net +{best['net_gain']:.1f} "
-                f"after the -4."
-            )
-
-        else:
-
-            decision = "ROLL"
-
-            reason = (
-                "The best move does not "
-                "justify the -4."
-            )
+                f"+{b['projected_gain']:.1f}; "
+                f"net model gain remains "
+                f"positive after the -4.",
+            "suggestions":
+                suggestions,
+        }
 
     return {
-        "decision": decision,
-        "reason": reason,
-        "suggestions": suggestions,
+        "decision": "ROLL",
+        "reason":
+            "The best move does not justify the -4.",
+        "suggestions":
+            suggestions,
     }
 
 
@@ -1443,10 +1340,16 @@ def transfer_decision(
 # ============================================================
 
 def captain_recommendations(
-    squad
+    squad,
+    elite_rows=None,
 ):
 
+    elite_caps = elite_captain_counts(
+        elite_rows or []
+    )
+
     available = [
+
         p
         for p in squad
 
@@ -1461,34 +1364,34 @@ def captain_recommendations(
 
         return (
             blended_score(p)
-
-            + num(
-                p["ep_next"]
-            ) * 1.5
-
+            + num(p["ep_next"])
+            * 1.5
             + max(
                 0,
                 3 - num(
                     p["fdr"],
                     3,
                 ),
-            ) * 1.5
-
+            )
+            * 1.5
             + (
                 4
-                if p[
-                    "next_gw_fixtures"
-                ] >= 2
+                if p["next_gw_fixtures"]
+                >= 2
                 else 0
             )
+            + elite_caps.get(
+                p["name"],
+                0,
+            )
+            * 2
         )
 
-    available.sort(
+    return sorted(
+        available,
         key=score,
         reverse=True,
-    )
-
-    return available[:5]
+    )[:5]
 
 
 # ============================================================
@@ -1500,9 +1403,7 @@ def best_xi(squad):
     if len(squad) < 11:
         return None
 
-    by_pos = defaultdict(
-        list
-    )
+    by_pos = defaultdict(list)
 
     for p in squad:
 
@@ -1547,7 +1448,6 @@ def best_xi(squad):
         return None
 
     best = None
-
     best_score = float(
         "-inf"
     )
@@ -1576,35 +1476,34 @@ def best_xi(squad):
 
         if score > best_score:
 
-            best_score = score
+            ids = {
+                p["id"]
+                for p in lineup
+            }
 
             best = {
-
-                "formation": (
-                    f"{d}-{m}-{f}"
-                ),
-
+                "formation":
+                    f"{d}-{m}-{f}",
                 "lineup": lineup,
-
                 "bench": [
                     p
                     for p in squad
                     if p["id"]
-                    not in {
-                        x["id"]
-                        for x in lineup
-                    }
+                    not in ids
                 ],
-
                 "score": score,
             }
+
+            best_score = score
 
     return best
 
 
-def bench_boost_value(
-    squad
-):
+# ============================================================
+# BENCH BOOST
+# ============================================================
+
+def bench_boost_value(squad):
 
     try:
 
@@ -1616,20 +1515,17 @@ def bench_boost_value(
 
         return None
 
-    bench = [
-        p
-        for p in squad
-        if p.get(
+    rows = []
+    total = 0
+
+    for p in [
+        x
+        for x in squad
+        if x.get(
             "multiplier",
             1,
         ) == 0
-    ]
-
-    rows = []
-
-    total = 0
-
-    for p in bench:
+    ]:
 
         pts = live.get(
             p["id"],
@@ -1640,8 +1536,10 @@ def bench_boost_value(
 
         rows.append(
             {
-                "Player": p["name"],
-                "GW Points": pts,
+                "Player":
+                    p["name"],
+                "GW Points":
+                    pts,
             }
         )
 
@@ -1662,19 +1560,6 @@ def load_elite_manager(
     gameweek,
 ):
 
-    if not entry_id:
-
-        return {
-            "name": name,
-            "entry_id": entry_id,
-            "status": "UNVERIFIED",
-            "error": "No Team ID configured.",
-            "squad": [],
-            "transfers": [],
-            "captain": None,
-            "vice": None,
-        }
-
     try:
 
         info = get_entry_info(
@@ -1682,10 +1567,7 @@ def load_elite_manager(
         )
 
         if (
-            not isinstance(
-                info,
-                dict,
-            )
+            not isinstance(info, dict)
             or "id" not in info
         ):
 
@@ -1693,14 +1575,10 @@ def load_elite_manager(
                 "name": name,
                 "entry_id": entry_id,
                 "status": "FAILED",
-                "error": (
-                    "FPL API could not "
-                    "verify this Team ID."
-                ),
+                "error":
+                    "FPL API could not verify this Team ID.",
                 "squad": [],
                 "transfers": [],
-                "captain": None,
-                "vice": None,
             }
 
         picks_data = get_entry_picks(
@@ -1708,215 +1586,175 @@ def load_elite_manager(
             gameweek,
         )
 
-        picks = picks_data.get(
-            "picks",
-            [],
-        )
-
         squad = []
-
         captain = None
-
         vice = None
 
-        for pick in picks:
+        for pick in picks_data.get(
+            "picks",
+            [],
+        ):
 
-            player = player_by_id.get(
-                pick.get(
-                    "element"
-                )
+            p = player_by_id.get(
+                pick.get("element")
             )
 
-            if not player:
+            if not p:
                 continue
 
-            p = player.copy()
+            p = p.copy()
 
-            p["is_captain"] = bool(
-                pick.get(
-                    "is_captain"
-                )
-            )
-
-            p["is_vice"] = bool(
-                pick.get(
-                    "is_vice_captain"
-                )
-            )
-
-            p["multiplier"] = safe_int(
-                pick.get(
-                    "multiplier"
+            p.update(
+                is_captain=bool(
+                    pick.get(
+                        "is_captain"
+                    )
                 ),
-                1,
+                is_vice=bool(
+                    pick.get(
+                        "is_vice_captain"
+                    )
+                ),
+                multiplier=safe_int(
+                    pick.get(
+                        "multiplier"
+                    ),
+                    1,
+                ),
             )
 
-            squad.append(
-                p
-            )
+            squad.append(p)
 
-            if pick.get(
-                "is_captain"
-            ):
+            if p["is_captain"]:
+                captain = p["id"]
 
-                captain = p[
-                    "name"
-                ]
-
-            if pick.get(
-                "is_vice_captain"
-            ):
-
-                vice = p[
-                    "name"
-                ]
+            if p["is_vice"]:
+                vice = p["id"]
 
         transfers = []
 
         try:
 
-            transfer_data = (
-                get_entry_transfers(
-                    entry_id
-                )
+            td = get_entry_transfers(
+                entry_id
             )
 
             if isinstance(
-                transfer_data,
+                td,
                 list,
             ):
 
-                for transfer in transfer_data:
+                for t in td:
 
-                    if safe_int(
-                        transfer.get(
-                            "event"
+                    if (
+                        safe_int(
+                            t.get("event")
                         )
-                    ) != gameweek:
-
+                        != gameweek
+                    ):
                         continue
 
-                    out_player = (
-                        player_by_id.get(
-                            transfer.get(
-                                "element_out"
-                            )
+                    outp = player_by_id.get(
+                        t.get(
+                            "element_out"
                         )
                     )
 
-                    in_player = (
-                        player_by_id.get(
-                            transfer.get(
-                                "element_in"
-                            )
+                    inp = player_by_id.get(
+                        t.get(
+                            "element_in"
                         )
                     )
 
                     transfers.append(
                         {
-                            "out": (
-                                out_player[
-                                    "name"
-                                ]
-                                if out_player
+                            "out_id":
+                                t.get(
+                                    "element_out"
+                                ),
+                            "in_id":
+                                t.get(
+                                    "element_in"
+                                ),
+                            "out":
+                                outp["name"]
+                                if outp
                                 else str(
-                                    transfer.get(
+                                    t.get(
                                         "element_out"
                                     )
-                                )
-                            ),
-
-                            "in": (
-                                in_player[
-                                    "name"
-                                ]
-                                if in_player
+                                ),
+                            "in":
+                                inp["name"]
+                                if inp
                                 else str(
-                                    transfer.get(
+                                    t.get(
                                         "element_in"
                                     )
-                                )
-                            ),
-
-                            "cost": safe_int(
-                                transfer.get(
-                                    "event_cost"
                                 ),
-                                0,
-                            ),
+                            "cost":
+                                safe_int(
+                                    t.get(
+                                        "event_cost"
+                                    ),
+                                    0,
+                                ),
                         }
                     )
 
         except Exception:
 
-            transfers = []
+            pass
 
         manager_name = (
-            f"{info.get('player_first_name', '')} "
-            f"{info.get('player_last_name', '')}"
-        ).strip()
+            f"{info.get('player_first_name','')} "
+            f"{info.get('player_last_name','')}"
+            .strip()
+            or "—"
+        )
 
         return {
-
             "name": name,
-
             "entry_id": entry_id,
-
             "status": "OK",
-
-            "entry_name": info.get(
-                "name",
-                "—",
-            ),
-
-            "manager_name": (
-                manager_name
-                if manager_name
-                else "—"
-            ),
-
-            "overall_rank": info.get(
-                "summary_overall_rank",
-                "—",
-            ),
-
-            "total_points": info.get(
-                "summary_overall_points",
-                "—",
-            ),
-
-            "gw_points": info.get(
-                "summary_event_points",
-                "—",
-            ),
-
+            "entry_name":
+                info.get(
+                    "name",
+                    "—",
+                ),
+            "manager_name":
+                manager_name,
+            "overall_rank":
+                info.get(
+                    "summary_overall_rank",
+                    "—",
+                ),
+            "total_points":
+                info.get(
+                    "summary_overall_points",
+                    "—",
+                ),
+            "gw_points":
+                info.get(
+                    "summary_event_points",
+                    "—",
+                ),
             "squad": squad,
-
             "captain": captain,
-
             "vice": vice,
-
             "transfers": transfers,
         }
 
     except Exception as exc:
 
         return {
-
             "name": name,
-
             "entry_id": entry_id,
-
             "status": "FAILED",
-
             "error": str(exc),
-
             "squad": [],
-
             "transfers": [],
-
             "captain": None,
-
             "vice": None,
         }
 
@@ -1929,109 +1767,123 @@ def load_all_elite_managers(
     gameweek
 ):
 
-    rows = []
-
-    for name, meta in (
-        ELITE_MANAGERS.items()
-    ):
-
-        rows.append(
-            load_elite_manager(
-                name,
-                meta["entry_id"],
-                gameweek,
-            )
+    return [
+        load_elite_manager(
+            n,
+            m["entry_id"],
+            gameweek,
         )
+        for n, m
+        in ELITE_MANAGERS.items()
+    ]
 
-    return rows
+
+def elite_player_counts(rows):
+
+    counts = defaultdict(int)
+
+    for r in rows:
+
+        if r.get(
+            "status"
+        ) != "OK":
+
+            continue
+
+        for p in {
+            x["id"]
+            for x in r.get(
+                "squad",
+                []
+            )
+            if x.get("id")
+            is not None
+        }:
+
+            counts[p] += 1
+
+    return counts
 
 
-def elite_consensus(
-    elite_rows
-):
+def elite_captain_counts(rows):
 
-    valid = [
-        row
-        for row in elite_rows
+    counts = defaultdict(int)
+
+    for r in rows:
 
         if (
-            row.get(
-                "status"
-            ) == "OK"
+            r.get("status")
+            == "OK"
+            and r.get("captain")
+            in player_by_id
+        ):
 
-            and row.get(
-                "squad"
-            )
+            counts[
+                player_by_id[
+                    r["captain"]
+                ]["name"]
+            ] += 1
+
+    return counts
+
+
+def elite_consensus(rows):
+
+    valid = [
+        r
+        for r in rows
+        if (
+            r.get("status")
+            == "OK"
+            and r.get("squad")
         )
     ]
 
     total = len(valid)
 
-    if total == 0:
+    if not total:
 
         return (
             [],
             [],
             [],
             [],
+            valid,
         )
 
-    player_counts = defaultdict(
-        int
+    pc = elite_player_counts(
+        valid
     )
 
-    captain_counts = defaultdict(
-        int
+    cc = elite_captain_counts(
+        valid
     )
 
-    transfer_counts = defaultdict(
-        int
-    )
+    tc = defaultdict(int)
 
-    for row in valid:
+    for r in valid:
 
-        unique_players = {
-            p["id"]: p
-            for p in row["squad"]
-            if p.get("id")
-            is not None
-        }
-
-        for pid in unique_players:
-
-            player_counts[
-                pid
-            ] += 1
-
-        if row.get(
-            "captain"
-        ):
-
-            captain_counts[
-                row["captain"]
-            ] += 1
-
-        for transfer in row.get(
+        for t in r.get(
             "transfers",
             [],
         ):
 
-            transfer_counts[
+            tc[
                 (
-                    transfer["out"],
-                    transfer["in"],
+                    t["out"],
+                    t["in"],
                 )
             ] += 1
 
-    player_rows = []
+    consensus = []
 
     for pid, count in sorted(
-        player_counts.items(),
-        key=lambda item: (
-            -item[1],
+        pc.items(),
+        key=lambda x: (
+            -x[1],
             player_by_id.get(
-                item[0],
-                {},
+                x[0],
+                {}
             ).get(
                 "name",
                 "",
@@ -2043,75 +1895,99 @@ def elite_consensus(
             pid
         )
 
-        if not p:
-            continue
+        if p:
 
-        player_rows.append(
-            {
-                "Player": p["name"],
-                "Club": p["team"],
-                "Pos": p["position"],
-                "Elite": (
-                    f"{count}/{total}"
+            consensus.append(
+                {
+                    "Player":
+                        p["name"],
+                    "Player ID":
+                        pid,
+                    "Club":
+                        p["team"],
+                    "Pos":
+                        p["position"],
+                    "Elite":
+                        f"{count}/{total}",
+                    "Elite %":
+                        round(
+                            100
+                            * count
+                            / total
+                        ),
+                    "Model":
+                        round(
+                            p["blended"],
+                            1,
+                        ),
+                    "FDR":
+                        round(
+                            p["fdr"],
+                            1,
+                        ),
+                }
+            )
+
+    captains = [
+
+        {
+            "Captain":
+                player_by_id.get(
+                    pid,
+                    {},
+                ).get(
+                    "name",
+                    "?",
                 ),
-                "Elite %": round(
+            "Managers":
+                f"{c}/{total}",
+            "%":
+                round(
                     100
-                    * count
+                    * c
                     / total
                 ),
-                "Model": round(
-                    blended_score(p),
-                    1,
-                ),
-                "FDR": round(
-                    p["fdr"],
-                    1,
-                ),
-            }
-        )
-
-    captain_rows = [
-        {
-            "Captain": name,
-            "Managers": (
-                f"{count}/{total}"
-            ),
-            "%": round(
-                100
-                * count
-                / total
-            ),
         }
 
-        for name, count in sorted(
-            captain_counts.items(),
-            key=lambda item: -item[1],
+        for pid, c
+        in sorted(
+            (
+                (
+                    pid,
+                    c,
+                )
+                for pid, c
+                in cc.items()
+            ),
+            key=lambda x:
+                -x[1],
         )
     ]
 
-    transfer_rows = [
+    transfers = [
+
         {
-            "Out": out_name,
-            "In": in_name,
-            "Managers": count,
+            "Out": o,
+            "In": i,
+            "Managers": c,
         }
 
         for (
-            (
-                out_name,
-                in_name,
-            ),
-            count,
-        ) in sorted(
-            transfer_counts.items(),
-            key=lambda item: -item[1],
+            o,
+            i
+        ), c
+        in sorted(
+            tc.items(),
+            key=lambda x:
+                -x[1],
         )
     ]
 
     return (
-        player_rows,
-        captain_rows,
-        transfer_rows,
+        consensus,
+        captains,
+        transfers,
+        valid,
         valid,
     )
 
@@ -2125,15 +2001,9 @@ def render_elite_tracker(
     )
 
     st.caption(
-        "Seven tracked FPL managers — "
-        "current squads, captaincy, transfers "
-        "and elite consensus."
-    )
-
-    st.info(
-        "Elite managers are only loaded when you "
-        "press the button below. This keeps the "
-        "main app fast."
+        "Seven hard-coded elite managers — "
+        "verified IDs, squads, captaincy, transfers "
+        "and consensus."
     )
 
     if st.button(
@@ -2143,7 +2013,7 @@ def render_elite_tracker(
     ):
 
         with st.spinner(
-            "Loading 7 elite managers..."
+            "Loading seven elite managers..."
         ):
 
             st.session_state[
@@ -2152,138 +2022,124 @@ def render_elite_tracker(
                 current_gw
             )
 
-    elite_rows = st.session_state.get(
+    rows = st.session_state.get(
         "elite_rows"
     )
 
-    if not elite_rows:
+    if not rows:
 
         st.warning(
             "Elite managers have not been loaded yet."
         )
 
-        st.write(
-            "Press **Load / Refresh Elite Managers** "
-            "to retrieve the seven teams."
-        )
-
         return
 
-    # --------------------------------------------------------
-    # VERIFICATION
-    # --------------------------------------------------------
+    verification = []
 
-    with st.expander(
-        "🔐 Team ID Verification",
-        expanded=False,
+    for name, meta in (
+        ELITE_MANAGERS.items()
     ):
 
-        verification_rows = []
+        r = next(
+            (
+                x
+                for x in rows
+                if x["name"] == name
+            ),
+            None,
+        )
 
-        for name, meta in (
-            ELITE_MANAGERS.items()
-        ):
-
-            row = next(
-                (
-                    r
-                    for r in elite_rows
-                    if r["name"] == name
-                ),
-                None,
-            )
-
-            if row and row.get(
-                "status"
-            ) == "OK":
-
-                verification_rows.append(
-                    {
-                        "Manager": name,
-                        "Team ID": meta[
-                            "entry_id"
-                        ],
-                        "Status": "✅ VERIFIED",
-                        "FPL Team": row.get(
-                            "entry_name",
+        verification.append(
+            {
+                "Manager":
+                    name,
+                "Team ID":
+                    meta["entry_id"],
+                "Status":
+                    "✅ VERIFIED"
+                    if (
+                        r
+                        and r.get(
+                            "status"
+                        )
+                        == "OK"
+                    )
+                    else "❌ FAILED",
+                "FPL Team":
+                    r.get(
+                        "entry_name",
+                        r.get(
+                            "error",
                             "—",
                         ),
-                    }
-                )
+                    )
+                    if r
+                    else "—",
+                "Overall Rank":
+                    r.get(
+                        "overall_rank",
+                        "—",
+                    )
+                    if r
+                    else "—",
+            }
+        )
 
-            else:
-
-                verification_rows.append(
-                    {
-                        "Manager": name,
-                        "Team ID": meta[
-                            "entry_id"
-                        ],
-                        "Status": "❌ FAILED",
-                        "FPL Team": (
-                            row.get(
-                                "error",
-                                "—",
-                            )
-                            if row
-                            else "—"
-                        ),
-                    }
-                )
+    with st.expander(
+        "🔐 Team ID Verification"
+    ):
 
         st.dataframe(
             pd.DataFrame(
-                verification_rows
+                verification
             ),
             use_container_width=True,
             hide_index=True,
         )
 
-    # --------------------------------------------------------
-    # OVERVIEW
-    # --------------------------------------------------------
+    overview = [
 
-    overview = []
-
-    for row in elite_rows:
-
-        overview.append(
-            {
-                "Manager": row[
-                    "name"
-                ],
-
-                "Status": (
-                    "🟢 Connected"
-                    if row.get(
-                        "status"
-                    ) == "OK"
-                    else "🔴 Failed"
-                ),
-
-                "GW Points": row.get(
+        {
+            "Manager":
+                r["name"],
+            "Status":
+                "🟢 Connected"
+                if r.get(
+                    "status"
+                )
+                == "OK"
+                else "🔴 Failed",
+            "GW Points":
+                r.get(
                     "gw_points",
                     "—",
                 ),
-
-                "Overall Rank": row.get(
+            "Overall Rank":
+                r.get(
                     "overall_rank",
                     "—",
                 ),
-
-                "Captain": row.get(
-                    "captain",
+            "Captain":
+                player_by_id.get(
+                    r.get(
+                        "captain"
+                    ),
+                    {},
+                ).get(
+                    "name",
                     "—",
                 ),
-
-                "Transfers": len(
-                    row.get(
+            "Transfers":
+                len(
+                    r.get(
                         "transfers",
                         [],
                     )
                 ),
-            }
-        )
+        }
+
+        for r in rows
+    ]
 
     st.dataframe(
         pd.DataFrame(
@@ -2298,22 +2154,16 @@ def render_elite_tracker(
         captains,
         transfers,
         valid,
-    ) = elite_consensus(
-        elite_rows
-    )
+        _,
+    ) = elite_consensus(rows)
 
     if not valid:
 
         st.error(
-            "None of the seven elite managers "
-            "could currently be connected."
+            "None of the seven elite managers could currently be connected."
         )
 
         return
-
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -2324,84 +2174,54 @@ def render_elite_tracker(
 
     c2.metric(
         "Elite Captain",
-        (
-            captains[0][
-                "Captain"
-            ]
-            if captains
-            else "—"
-        ),
+        captains[0]["Captain"]
+        if captains
+        else "—",
     )
 
     c3.metric(
         "Captain Consensus",
-        (
-            captains[0][
-                "Managers"
-            ]
-            if captains
-            else "—"
-        ),
+        captains[0]["Managers"]
+        if captains
+        else "—",
     )
 
     c4.metric(
         "Most Owned",
-        (
-            consensus[0][
-                "Player"
-            ]
-            if consensus
-            else "—"
-        ),
+        consensus[0]["Player"]
+        if consensus
+        else "—",
     )
-
-    # --------------------------------------------------------
-    # CONSENSUS
-    # --------------------------------------------------------
 
     st.subheader(
         "🔥 Elite Player Consensus"
     )
 
-    if consensus:
+    st.dataframe(
+        pd.DataFrame(
+            consensus[:30]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-        st.dataframe(
-            pd.DataFrame(
-                consensus[:30]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+    a, b = st.columns(2)
 
-    # --------------------------------------------------------
-    # CAPTAIN / TRANSFERS
-    # --------------------------------------------------------
-
-    left, right = st.columns(2)
-
-    with left:
+    with a:
 
         st.subheader(
             "🧢 Captain Consensus"
         )
 
-        if captains:
+        st.dataframe(
+            pd.DataFrame(
+                captains
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-            st.dataframe(
-                pd.DataFrame(
-                    captains
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-
-            st.info(
-                "No captain data."
-            )
-
-    with right:
+    with b:
 
         st.subheader(
             "🔄 Elite Transfers"
@@ -2420,13 +2240,8 @@ def render_elite_tracker(
         else:
 
             st.info(
-                "No current-GW transfers "
-                "recorded."
+                "No current-GW transfers recorded."
             )
-
-    # --------------------------------------------------------
-    # YOUR TEAM VS ELITE
-    # --------------------------------------------------------
 
     st.divider()
 
@@ -2437,8 +2252,7 @@ def render_elite_tracker(
     if not my_squad:
 
         st.info(
-            "Enter your FPL Team ID in the "
-            "sidebar to compare your squad."
+            "Your FPL team is not loaded."
         )
 
     else:
@@ -2450,20 +2264,15 @@ def render_elite_tracker(
 
         threshold = max(
             3,
-            (
-                len(valid)
-                + 1
-            ) // 2,
+            (len(valid) + 1) // 2,
         )
 
         comparison = []
 
-        for row in consensus:
+        for r in consensus:
 
             count = safe_int(
-                str(
-                    row["Elite"]
-                ).split(
+                r["Elite"].split(
                     "/"
                 )[0]
             )
@@ -2471,22 +2280,17 @@ def render_elite_tracker(
             if count < threshold:
                 continue
 
-            player = next(
-                (
-                    p
-                    for p in players
-                    if p["name"]
-                    == row["Player"]
-                ),
-                None,
+            pid = r["Player ID"]
+
+            p = player_by_id.get(
+                pid
             )
 
-            if not player:
+            if not p:
                 continue
 
             is_owned = (
-                player["id"]
-                in owned
+                pid in owned
             )
 
             if is_owned:
@@ -2495,13 +2299,13 @@ def render_elite_tracker(
                     "✅ Already own"
                 )
 
-            elif row["Model"] >= 60:
+            elif r["Model"] >= 60:
 
                 verdict = (
                     "🟢 Elite + model target"
                 )
 
-            elif row["Model"] >= 50:
+            elif r["Model"] >= 50:
 
                 verdict = (
                     "🟡 Elite target — review"
@@ -2515,30 +2319,24 @@ def render_elite_tracker(
 
             comparison.append(
                 {
-                    "Player": player[
-                        "name"
-                    ],
-                    "Club": player[
-                        "team"
-                    ],
-                    "Elite": row[
-                        "Elite"
-                    ],
-                    "Elite %": row[
-                        "Elite %"
-                    ],
-                    "You Own": (
+                    "Player":
+                        p["name"],
+                    "Club":
+                        p["team"],
+                    "Elite":
+                        r["Elite"],
+                    "Elite %":
+                        r["Elite %"],
+                    "You Own":
                         "✅ Yes"
                         if is_owned
-                        else "❌ No"
-                    ),
-                    "Model": row[
-                        "Model"
-                    ],
-                    "FDR": row[
-                        "FDR"
-                    ],
-                    "Verdict": verdict,
+                        else "❌ No",
+                    "Model":
+                        r["Model"],
+                    "FDR":
+                        r["FDR"],
+                    "Verdict":
+                        verdict,
                 }
             )
 
@@ -2555,76 +2353,48 @@ def render_elite_tracker(
         else:
 
             st.info(
-                "No strong elite consensus "
-                "differences found."
+                "No strong elite consensus differences found."
             )
 
-    # --------------------------------------------------------
-    # ELITE PLAYERS YOU DON'T OWN
-    # --------------------------------------------------------
+        targets = []
 
-    if my_squad:
-
-        owned = {
-            p["id"]
-            for p in my_squad
-        }
-
-        elite_targets = []
-
-        for row in consensus:
+        for r in consensus:
 
             count = safe_int(
-                str(
-                    row["Elite"]
-                ).split(
+                r["Elite"].split(
                     "/"
                 )[0]
             )
 
-            if count < 3:
-                continue
-
-            player = next(
-                (
-                    p
-                    for p in players
-                    if p["name"]
-                    == row["Player"]
-                ),
-                None,
+            p = player_by_id.get(
+                r["Player ID"]
             )
 
-            if not player:
-                continue
+            if (
+                p
+                and count >= 3
+                and p["id"]
+                not in owned
+            ):
 
-            if player["id"] in owned:
-                continue
+                targets.append(
+                    {
+                        "Player":
+                            p["name"],
+                        "Club":
+                            p["team"],
+                        "Elite Ownership":
+                            r["Elite"],
+                        "Elite %":
+                            r["Elite %"],
+                        "Model":
+                            r["Model"],
+                        "FDR":
+                            r["FDR"],
+                    }
+                )
 
-            elite_targets.append(
-                {
-                    "Player": player[
-                        "name"
-                    ],
-                    "Club": player[
-                        "team"
-                    ],
-                    "Elite Ownership": row[
-                        "Elite"
-                    ],
-                    "Elite %": row[
-                        "Elite %"
-                    ],
-                    "Model": row[
-                        "Model"
-                    ],
-                    "FDR": row[
-                        "FDR"
-                    ],
-                }
-            )
-
-        if elite_targets:
+        if targets:
 
             st.subheader(
                 "🎯 Elite Players You Don't Own"
@@ -2632,15 +2402,57 @@ def render_elite_tracker(
 
             st.dataframe(
                 pd.DataFrame(
-                    elite_targets[:15]
+                    targets[:15]
                 ),
                 use_container_width=True,
                 hide_index=True,
             )
 
-    # --------------------------------------------------------
-    # INDIVIDUAL SQUADS
-    # --------------------------------------------------------
+        elite_counts = elite_player_counts(
+            valid
+        )
+
+        ignored = [
+
+            p
+            for p in my_squad
+
+            if elite_counts.get(
+                p["id"],
+                0,
+            ) <= 1
+        ]
+
+        if ignored:
+
+            st.subheader(
+                "⚠️ Your Players With Little Elite Support"
+            )
+
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Player":
+                                p["name"],
+                            "Club":
+                                p["team"],
+                            "Elite Owners":
+                                f"{elite_counts.get(p['id'],0)}/{len(valid)}",
+                            "Model":
+                                round(
+                                    p["blended"],
+                                    1,
+                                ),
+                            "Action":
+                                hold_sell(p),
+                        }
+                        for p in ignored
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     st.divider()
 
@@ -2648,80 +2460,60 @@ def render_elite_tracker(
         "👤 Individual Elite Squads"
     )
 
-    for row in valid:
+    for r in valid:
 
         with st.expander(
-            (
-                f"{row['name']} — "
-                f"{row.get('entry_name', 'FPL Team')}"
-            )
+            f"{r['name']} — "
+            f"{r.get('entry_name','FPL Team')}"
         ):
 
             st.caption(
-                f"Team ID: {row['entry_id']} | "
+                f"Team ID: {r['entry_id']} | "
                 f"Overall rank: "
-                f"{row.get('overall_rank', '—')}"
+                f"{r.get('overall_rank','—')}"
             )
-
-            squad_rows = []
-
-            for p in row["squad"]:
-
-                squad_rows.append(
-                    {
-                        "Player": p[
-                            "name"
-                        ],
-                        "Club": p[
-                            "team"
-                        ],
-                        "Pos": p[
-                            "position"
-                        ],
-                        "Price": (
-                            f"£{p['price']:.1f}m"
-                        ),
-                        "Captain": (
-                            "👑"
-                            if p[
-                                "name"
-                            ]
-                            == row.get(
-                                "captain"
-                            )
-                            else ""
-                        ),
-                        "Model": round(
-                            blended_score(
-                                p
-                            ),
-                            1,
-                        ),
-                    }
-                )
 
             st.dataframe(
                 pd.DataFrame(
-                    squad_rows
+                    [
+                        {
+                            "Player":
+                                p["name"],
+                            "Club":
+                                p["team"],
+                            "Pos":
+                                p["position"],
+                            "Price":
+                                f"£{p['price']:.1f}m",
+                            "Captain":
+                                "👑"
+                                if p["id"]
+                                == r.get(
+                                    "captain"
+                                )
+                                else "",
+                            "Model":
+                                round(
+                                    p["blended"],
+                                    1,
+                                ),
+                        }
+                        for p in r["squad"]
+                    ]
                 ),
                 use_container_width=True,
                 hide_index=True,
             )
 
-            if row.get(
+            if r.get(
                 "transfers"
             ):
 
                 st.write(
                     "**Current GW transfers:** "
                     + ", ".join(
-                        (
-                            f"{t['out']} → "
-                            f"{t['in']}"
-                        )
-                        for t in row[
-                            "transfers"
-                        ]
+                        f"{t['out']} → {t['in']}"
+                        for t in r["transfers"]
                     )
                 )
 
@@ -2751,24 +2543,21 @@ def extract_video_id(
 
     if parsed.netloc:
 
-        query_id = parse_qs(
+        q = parse_qs(
             parsed.query
         ).get(
             "v",
             [None],
         )[0]
 
-        if (
-            query_id
-            and re.fullmatch(
-                r"[0-9A-Za-z_-]{11}",
-                query_id,
-            )
+        if q and re.fullmatch(
+            r"[0-9A-Za-z_-]{11}",
+            q,
         ):
 
-            return query_id
+            return q
 
-    patterns = [
+    for pattern in [
 
         r"youtu\.be/([0-9A-Za-z_-]{11})",
 
@@ -2777,26 +2566,23 @@ def extract_video_id(
         r"youtube\.com/shorts/([0-9A-Za-z_-]{11})",
 
         r"youtube\.com/live/([0-9A-Za-z_-]{11})",
-    ]
 
-    for pattern in patterns:
+    ]:
 
-        match = re.search(
+        m = re.search(
             pattern,
             value,
         )
 
-        if match:
+        if m:
 
-            return match.group(
-                1
-            )
+            return m.group(1)
 
     return None
 
 
 def fetch_youtube_transcript(
-    video_identifier
+    identifier
 ):
 
     if (
@@ -2806,18 +2592,14 @@ def fetch_youtube_transcript(
 
         return (
             None,
-            (
-                "youtube-transcript-api "
-                "is not installed. "
-                "Add it to requirements.txt."
-            ),
+            "youtube-transcript-api is not installed.",
         )
 
-    video_id = extract_video_id(
-        video_identifier
+    vid = extract_video_id(
+        identifier
     )
 
-    if not video_id:
+    if not vid:
 
         return (
             None,
@@ -2826,38 +2608,38 @@ def fetch_youtube_transcript(
 
     try:
 
-        api = YouTubeTranscriptApi()
+        api = (
+            YouTubeTranscriptApi()
+        )
 
         if hasattr(
             api,
             "fetch",
         ):
 
-            transcript = api.fetch(
-                video_id
+            tr = api.fetch(
+                vid
             )
 
             lines = []
 
-            for snippet in transcript:
+            for s in tr:
 
-                if isinstance(
-                    snippet,
-                    dict,
-                ):
-
-                    text = snippet.get(
+                text = (
+                    s.get(
                         "text",
                         "",
                     )
-
-                else:
-
-                    text = getattr(
-                        snippet,
-                        "text",
-                        str(snippet),
+                    if isinstance(
+                        s,
+                        dict,
                     )
+                    else getattr(
+                        s,
+                        "text",
+                        str(s),
+                    )
+                )
 
                 if text:
 
@@ -2867,16 +2649,10 @@ def fetch_youtube_transcript(
                         ).strip()
                     )
 
-            result = " ".join(
-                x
-                for x in lines
-                if x
-            )
-
-            if result:
+            if lines:
 
                 return (
-                    result,
+                    " ".join(lines),
                     None,
                 )
 
@@ -2885,24 +2661,22 @@ def fetch_youtube_transcript(
             "get_transcript",
         ):
 
-            transcript = (
+            tr = (
                 YouTubeTranscriptApi
                 .get_transcript(
-                    video_id
+                    vid
                 )
             )
 
             result = " ".join(
                 str(
-                    item.get(
+                    x.get(
                         "text",
                         "",
                     )
                 )
-
-                for item in transcript
-
-                if item.get(
+                for x in tr
+                if x.get(
                     "text"
                 )
             )
@@ -2923,18 +2697,12 @@ def fetch_youtube_transcript(
 
         return (
             None,
-            (
-                "YouTube transcript could not "
-                "be retrieved. The video may "
-                "have captions disabled or "
-                "YouTube may be blocking access. "
-                f"Technical detail: {exc}"
-            ),
+            f"YouTube transcript could not be retrieved: {exc}",
         )
 
 
 # ============================================================
-# GEMINI
+# SECRETS / GEMINI
 # ============================================================
 
 def get_secret(
@@ -2959,15 +2727,14 @@ def gemini_generate(
     system_instruction,
 ):
 
-    api_key = get_secret(
+    key = get_secret(
         "GEMINI_API_KEY"
     )
 
-    if not api_key:
+    if not key:
 
         raise RuntimeError(
-            "GEMINI_API_KEY is missing "
-            "from Streamlit Secrets."
+            "GEMINI_API_KEY is missing from Streamlit Secrets."
         )
 
     if (
@@ -2980,28 +2747,23 @@ def gemini_generate(
         )
 
     client = genai.Client(
-        api_key=api_key
+        api_key=key
     )
 
     errors = []
 
-    for model_name in GEMINI_MODELS:
+    for model in GEMINI_MODELS:
 
         try:
 
             response = (
-                client.models
-                .generate_content(
-                    model=model_name,
+                client.models.generate_content(
+                    model=model,
                     contents=prompt,
-                    config=(
-                        types
-                        .GenerateContentConfig(
-                            system_instruction=(
-                                system_instruction
-                            ),
-                            max_output_tokens=4000,
-                        )
+                    config=types.GenerateContentConfig(
+                        system_instruction=
+                            system_instruction,
+                        max_output_tokens=4000,
                     ),
                 )
             )
@@ -3016,17 +2778,17 @@ def gemini_generate(
 
                 return (
                     text,
-                    model_name,
+                    model,
                 )
 
             errors.append(
-                f"{model_name}: empty response"
+                f"{model}: empty response"
             )
 
         except Exception as exc:
 
             errors.append(
-                f"{model_name}: {exc}"
+                f"{model}: {exc}"
             )
 
     raise RuntimeError(
@@ -3034,6 +2796,10 @@ def gemini_generate(
         + "\n".join(errors)
     )
 
+
+# ============================================================
+# CONTEXT
+# ============================================================
 
 def creator_context(
     squad
@@ -3046,16 +2812,14 @@ def creator_context(
         )
 
     return "\n".join(
-        (
-            f"- {p['name']} "
-            f"({p['team']}, "
-            f"{p['position']}) | "
-            f"£{p['price']:.1f}m | "
-            f"Form {p['form']:.1f} | "
-            f"PPG {p['ppg']:.1f} | "
-            f"xGI/90 {p['xgi90']:.2f} | "
-            f"FDR {p['fdr']:.1f}"
-        )
+
+        f"- {p['name']} "
+        f"({p['team']}, {p['position']}) | "
+        f"£{p['price']:.1f}m | "
+        f"Form {p['form']:.1f} | "
+        f"PPG {p['ppg']:.1f} | "
+        f"xGI/90 {p['xgi90']:.2f} | "
+        f"FDR {p['fdr']:.1f}"
 
         for p in squad
     )
@@ -3063,17 +2827,16 @@ def creator_context(
 
 def elite_context():
 
-    elite_rows = st.session_state.get(
+    rows = st.session_state.get(
         "elite_rows",
         [],
     )
 
     valid = [
         r
-        for r in elite_rows
-        if r.get(
-            "status"
-        ) == "OK"
+        for r in rows
+        if r.get("status")
+        == "OK"
     ]
 
     if not valid:
@@ -3082,28 +2845,23 @@ def elite_context():
             "Elite managers have not been loaded."
         )
 
-    lines = []
-
-    for row in valid:
-
-        players_text = ", ".join(
-            p["name"]
-            for p in row[
-                "squad"
-            ]
-        )
-
-        lines.append(
-            (
-                f"{row['name']}: "
-                f"{players_text}; "
-                f"Captain="
-                f"{row.get('captain', '—')}"
-            )
-        )
-
     return "\n".join(
-        lines
+
+        f"{r['name']}: "
+        + ", ".join(
+            p["name"]
+            for p in r["squad"]
+        )
+        + "; Captain="
+        + player_by_id.get(
+            r.get("captain"),
+            {},
+        ).get(
+            "name",
+            "—",
+        )
+
+        for r in valid
     )
 
 
@@ -3120,19 +2878,16 @@ def render_creator_ai(
     )
 
     st.caption(
-        "Paste a YouTube FPL video and the app "
-        "will compare the creator's recommendations "
-        "against your squad, FPL data and the "
-        "elite-manager consensus."
+        "Paste a YouTube FPL video and compare "
+        "the creator with your squad, FPL data "
+        "and elite consensus."
     )
 
     st.subheader(
         "🎙️ Monitored Creator Channels"
     )
 
-    cols = st.columns(
-        5
-    )
+    cols = st.columns(5)
 
     for i, (
         name,
@@ -3149,9 +2904,8 @@ def render_creator_ai(
 
     video_url = st.text_input(
         "YouTube Video URL or ID",
-        placeholder=(
-            "https://www.youtube.com/watch?v=XXXXXXXXXXX"
-        ),
+        placeholder=
+            "https://www.youtube.com/watch?v=XXXXXXXXXXX",
     )
 
     if st.button(
@@ -3173,8 +2927,7 @@ def render_creator_ai(
         ):
 
             st.error(
-                "GEMINI_API_KEY is missing "
-                "from Streamlit Secrets."
+                "GEMINI_API_KEY is missing from Streamlit Secrets."
             )
 
             return
@@ -3191,93 +2944,62 @@ def render_creator_ai(
 
             if error:
 
-                st.error(
-                    error
-                )
+                st.error(error)
 
                 return
 
-            transcript = (
-                transcript[:25000]
-            )
-
-            top_players = sorted(
+            top = sorted(
                 players,
-                key=lambda p: p[
-                    "xgi90"
-                ],
+                key=lambda p:
+                    p["xgi90"],
                 reverse=True,
             )[:25]
 
-            player_data = "\n".join(
-                (
-                    f"- {p['name']} | "
-                    f"{p['team']} | "
-                    f"{p['position']} | "
-                    f"£{p['price']:.1f}m | "
-                    f"xGI/90 {p['xgi90']:.2f} | "
-                    f"Form {p['form']:.1f} | "
-                    f"PPG {p['ppg']:.1f} | "
-                    f"FDR {p['fdr']:.1f} | "
-                    f"4GW projection "
-                    f"{p['projection_4gw']:.1f}"
-                )
+            pdata = "\n".join(
 
-                for p in top_players
+                f"- {p['name']} | "
+                f"{p['team']} | "
+                f"{p['position']} | "
+                f"£{p['price']:.1f}m | "
+                f"xGI/90 {p['xgi90']:.2f} | "
+                f"Form {p['form']:.1f} | "
+                f"PPG {p['ppg']:.1f} | "
+                f"FDR {p['fdr']:.1f} | "
+                f"4GW {p['projection_4gw']:.1f}"
+
+                for p in top
             )
 
             prompt = f"""
-You are the FPL Assistant Manager's Creator Intelligence engine.
+You are the FPL Assistant Manager Creator Intelligence engine.
 
-CURRENT GAMEWEEK:
-GW{current_gw} -> GW{next_gw}
+CURRENT GW:
+{current_gw}
 
-MANAGER'S SQUAD:
+PLANNING GW:
+{next_gw}
+
+MANAGER SQUAD:
 {creator_context(my_squad)}
 
-CONNECTED ELITE MANAGERS:
+ELITE MANAGERS:
 {elite_context()}
 
-TOP CURRENT FPL DATA:
-{player_data}
+TOP FPL DATA:
+{pdata}
 
 YOUTUBE TRANSCRIPT:
-{transcript}
+{transcript[:25000]}
 
-Do the following:
+Identify the creator, summarise recommendations,
+extract buy/sell/hold/captain players,
+compare with supplied data and elite consensus,
+separate creator-only / elite-only / agreement,
+and give advice for the user's actual squad.
 
-1. Identify the creator and summarise their main recommendations.
+Flag transfers, captain changes and hits.
 
-2. Extract named players they recommend buying,
-selling, holding or captaining.
-
-3. Compare important recommendations against
-the supplied FPL data.
-
-4. Compare them against the connected elite-manager
-consensus.
-
-5. Identify:
-- CREATOR + ELITE AGREEMENT
-- CREATOR ONLY
-- ELITE ONLY
-- DATA FAVOURS CREATOR
-- DATA FAVOURS ELITE
-
-6. Give a recommendation specifically for
-the user's actual squad.
-
-7. Highlight recommendations requiring:
-- transfers
-- captain changes
-- transfer hits
-
-8. Do not invent statistics, injuries or quotes.
-
-9. Clearly distinguish what the creator said
-from what the model concludes.
-
-Use concise tables where useful.
+Never invent data or quotes.
 """
 
             try:
@@ -3285,14 +3007,7 @@ Use concise tables where useful.
                 result, model = (
                     gemini_generate(
                         prompt,
-                        (
-                            "You are an elite, "
-                            "objective FPL analyst. "
-                            "Never invent data. "
-                            "Treat YouTube opinions "
-                            "as opinions and stress-test "
-                            "them against supplied data."
-                        ),
+                        "You are an objective elite FPL analyst. Never invent data.",
                     )
                 )
 
@@ -3337,34 +3052,35 @@ def strategy_briefing(
     blanks = [
         p
         for p in squad
-        if p[
-            "next_gw_fixtures"
-        ] == 0
+        if p["next_gw_fixtures"]
+        == 0
     ]
 
     doubles = [
         p
         for p in squad
-        if p[
-            "next_gw_fixtures"
-        ] >= 2
+        if p["next_gw_fixtures"]
+        >= 2
     ]
 
-    captains = (
-        captain_recommendations(
-            squad
-        )
+    elites = st.session_state.get(
+        "elite_rows",
+        [],
     )
 
-    transfer = (
-        transfer_decision(
-            squad,
-            bank,
-            free_transfers,
-        )
+    caps = captain_recommendations(
+        squad,
+        elites,
     )
 
-    avg_fdr = (
+    transfer = transfer_decision(
+        squad,
+        bank,
+        free_transfers,
+        elites,
+    )
+
+    avg = (
         sum(
             p["fdr"]
             for p in squad
@@ -3374,47 +3090,38 @@ def strategy_briefing(
         else 3
     )
 
-    if len(blanks) >= 4:
+    chip = (
 
-        chip = (
-            "⚠️ 4+ players blank next GW. "
-            "Review Free Hit / restructuring options."
-        )
+        "⚠️ 4+ players blank next GW. "
+        "Review Free Hit / restructuring options."
 
-    elif len(doubles) >= 4:
+        if len(blanks) >= 4
 
-        chip = (
-            "⚡ 4+ players have multiple fixtures. "
-            "Potential Bench Boost / Triple Captain window."
-        )
+        else
 
-    else:
+        "⚡ 4+ players have multiple fixtures. "
+        "Potential Bench Boost / Triple Captain window."
 
-        chip = (
-            "Hold chips unless a stronger "
-            "fixture/blank window appears."
-        )
+        if len(doubles) >= 4
+
+        else
+
+        "Hold chips unless a stronger fixture/blank window appears."
+    )
 
     return {
-
         "injuries": injuries,
-
         "blanks": blanks,
-
         "doubles": doubles,
-
-        "captains": captains,
-
+        "captains": caps,
         "transfer": transfer,
-
-        "avg_fdr": avg_fdr,
-
+        "avg_fdr": avg,
         "chip": chip,
     }
 
 
 # ============================================================
-# SIDEBAR
+# APP HEADER
 # ============================================================
 
 st.title(
@@ -3427,23 +3134,47 @@ st.caption(
     "Elite Manager consensus"
 )
 
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
 with st.sidebar:
 
     st.header(
         "⚙️ Manager Settings"
     )
 
-    entry_id_input = st.text_input(
-        "FPL Team ID",
-        value="",
-        help=(
-            "The number in your FPL team URL."
+    selected_team_name = st.selectbox(
+        "Your FPL Team",
+        list(
+            MY_TEAMS.keys()
         ),
+        index=0,
     )
 
-    league_id_input = st.text_input(
-        "Mini-League ID (optional)",
-        value="",
+    selected_entry_id = MY_TEAMS[
+        selected_team_name
+    ]
+
+    st.caption(
+        f"Team ID: {selected_entry_id}"
+    )
+
+    selected_league_name = st.selectbox(
+        "Mini-League",
+        list(
+            MINI_LEAGUES.keys()
+        ),
+        index=0,
+    )
+
+    selected_league_id = MINI_LEAGUES[
+        selected_league_name
+    ]
+
+    st.caption(
+        f"League ID: {selected_league_id}"
     )
 
     free_transfers = st.number_input(
@@ -3456,8 +3187,22 @@ with st.sidebar:
 
     st.divider()
 
+    if st.button(
+        "🔄 Refresh FPL Data",
+        use_container_width=True,
+    ):
+
+        st.cache_data.clear()
+
+        st.session_state.pop(
+            "elite_rows",
+            None,
+        )
+
+        st.rerun()
+
     st.caption(
-        "FPL data is cached briefly for speed."
+        "Your Team ID and Mini-League IDs are hard-coded."
     )
 
 
@@ -3466,31 +3211,25 @@ with st.sidebar:
 # ============================================================
 
 team_data = None
-
 my_squad = []
 
-if entry_id_input.strip():
+try:
 
-    try:
-
-        team_data, my_squad = (
-            load_my_team(
-                safe_int(
-                    entry_id_input.strip()
-                )
-            )
+    team_data, my_squad = (
+        load_my_team(
+            selected_entry_id
         )
+    )
 
-    except Exception as exc:
+except Exception as exc:
 
-        st.error(
-            "Couldn't load your squad. "
-            "Check the Team ID."
-        )
+    st.error(
+        "Couldn't load your FPL squad."
+    )
 
-        st.caption(
-            str(exc)
-        )
+    st.caption(
+        str(exc)
+    )
 
 
 # ============================================================
@@ -3529,7 +3268,7 @@ with tabs[0]:
     if not my_squad:
 
         st.info(
-            "Enter your FPL Team ID in the sidebar."
+            "Your squad could not be loaded."
         )
 
     else:
@@ -3548,91 +3287,67 @@ with tabs[0]:
             / 10
         )
 
-        brief = strategy_briefing(
+        b = strategy_briefing(
             my_squad,
             bank,
             free_transfers,
         )
 
-        c1, c2, c3 = st.columns(
-            3
-        )
+        c1, c2, c3 = st.columns(3)
 
         c1.metric(
             "Transfer",
-            brief[
-                "transfer"
-            ][
+            b["transfer"][
                 "decision"
             ],
         )
 
         c2.metric(
             "Captain",
-            (
-                brief[
-                    "captains"
-                ][0]["name"]
-                if brief[
-                    "captains"
-                ]
-                else "—"
-            ),
+            b["captains"][0][
+                "name"
+            ]
+            if b["captains"]
+            else "—",
         )
 
         c3.metric(
             "Avg FDR",
-            f"{brief['avg_fdr']:.2f}",
+            f"{b['avg_fdr']:.2f}",
         )
 
         st.write(
             "**Transfer assessment:** "
-            + brief[
-                "transfer"
-            ][
-                "reason"
-            ]
+            + b["transfer"]["reason"]
         )
 
-        if brief[
-            "injuries"
-        ]:
+        if b["injuries"]:
 
             st.warning(
                 "🚨 Flags: "
                 + ", ".join(
                     p["name"]
-                    for p in brief[
-                        "injuries"
-                    ]
+                    for p in b["injuries"]
                 )
             )
 
-        if brief[
-            "blanks"
-        ]:
+        if b["blanks"]:
 
             st.error(
                 "⚠️ Blank GW: "
                 + ", ".join(
                     p["name"]
-                    for p in brief[
-                        "blanks"
-                    ]
+                    for p in b["blanks"]
                 )
             )
 
-        if brief[
-            "doubles"
-        ]:
+        if b["doubles"]:
 
             st.success(
                 "⚡ Double GW: "
                 + ", ".join(
                     p["name"]
-                    for p in brief[
-                        "doubles"
-                    ]
+                    for p in b["doubles"]
                 )
             )
 
@@ -3641,7 +3356,7 @@ with tabs[0]:
         )
 
         st.write(
-            brief["chip"]
+            b["chip"]
         )
 
 
@@ -3658,19 +3373,19 @@ with tabs[1]:
     if not my_squad:
 
         st.info(
-            "Enter your FPL Team ID."
+            "Your FPL squad could not be loaded."
         )
 
     else:
 
-        history = team_data.get(
+        h = team_data.get(
             "entry_history",
             {},
         )
 
         bank = (
             num(
-                history.get(
+                h.get(
                     "bank"
                 )
             )
@@ -3679,20 +3394,18 @@ with tabs[1]:
 
         value = (
             num(
-                history.get(
+                h.get(
                     "value"
                 )
             )
             / 10
         )
 
-        c1, c2, c3, c4 = st.columns(
-            4
-        )
+        c1, c2, c3, c4 = st.columns(4)
 
         c1.metric(
             "GW Points",
-            history.get(
+            h.get(
                 "points",
                 0,
             ),
@@ -3700,7 +3413,7 @@ with tabs[1]:
 
         c2.metric(
             "Total Points",
-            history.get(
+            h.get(
                 "total_points",
                 0,
             ),
@@ -3716,56 +3429,54 @@ with tabs[1]:
             f"£{bank:.1f}m",
         )
 
-        rows = [
-
-            {
-                "Player": p["name"],
-                "Club": p["team"],
-                "Pos": p["position"],
-                "Role": (
-                    "👑 Captain"
-                    if p[
-                        "is_captain"
-                    ]
-                    else (
-                        "VC"
-                        if p[
-                            "is_vice"
-                        ]
-                        else ""
-                    )
-                ),
-                "Price": (
-                    f"£{p['price']:.1f}m"
-                ),
-                "Points": p["points"],
-                "PPG": round(
-                    p["ppg"],
-                    1,
-                ),
-                "Form": round(
-                    p["form"],
-                    1,
-                ),
-                "xGI/90": round(
-                    p["xgi90"],
-                    2,
-                ),
-                "FDR": round(
-                    p["fdr"],
-                    1,
-                ),
-                "Status": player_status(
-                    p
-                ),
-            }
-
-            for p in my_squad
-        ]
-
         st.dataframe(
             pd.DataFrame(
-                rows
+                [
+                    {
+                        "Player":
+                            p["name"],
+                        "Club":
+                            p["team"],
+                        "Pos":
+                            p["position"],
+                        "Role":
+                            (
+                                "👑 Captain"
+                                if p["is_captain"]
+                                else
+                                "VC"
+                                if p["is_vice"]
+                                else ""
+                            ),
+                        "Price":
+                            f"£{p['price']:.1f}m",
+                        "Points":
+                            p["points"],
+                        "PPG":
+                            round(
+                                p["ppg"],
+                                1,
+                            ),
+                        "Form":
+                            round(
+                                p["form"],
+                                1,
+                            ),
+                        "xGI/90":
+                            round(
+                                p["xgi90"],
+                                2,
+                            ),
+                        "FDR":
+                            round(
+                                p["fdr"],
+                                1,
+                            ),
+                        "Status":
+                            player_status(p),
+                    }
+                    for p in my_squad
+                ]
             ),
             use_container_width=True,
             hide_index=True,
@@ -3790,104 +3501,94 @@ with tabs[2]:
 
     else:
 
-        history = team_data.get(
+        h = team_data.get(
             "entry_history",
             {},
         )
 
         bank = (
             num(
-                history.get(
+                h.get(
                     "bank"
                 )
             )
             / 10
         )
 
-        evaluation = (
-            transfer_decision(
-                my_squad,
-                bank,
-                free_transfers,
-            )
+        e = transfer_decision(
+            my_squad,
+            bank,
+            free_transfers,
+            st.session_state.get(
+                "elite_rows",
+                [],
+            ),
         )
 
         st.info(
-            f"**{evaluation['decision']}** — "
-            f"{evaluation['reason']}"
+            f"**{e['decision']}** — "
+            f"{e['reason']}"
         )
 
-        for i, suggestion in enumerate(
-            evaluation[
-                "suggestions"
-            ][:5],
+        for i, s in enumerate(
+            e["suggestions"][:5],
             1,
         ):
 
-            out_p = suggestion[
-                "out"
-            ]
+            outp = s["out"]
+            inp = s["in"]
 
-            in_p = suggestion[
-                "in"
-            ]
-
-            diff = suggestion[
+            diff = s[
                 "cost_difference"
             ]
 
-            if diff > 0:
+            money = (
 
-                money = (
-                    f"+£{diff:.1f}m"
-                )
+                f"+£{diff:.1f}m"
+                if diff > 0
 
-            elif diff < 0:
+                else
 
-                money = (
-                    f"frees £{abs(diff):.1f}m"
-                )
+                f"frees £{abs(diff):.1f}m"
+                if diff < 0
 
-            else:
+                else
 
-                money = (
-                    "same price"
-                )
+                "same price"
+            )
 
             st.markdown(
                 f"### {i}. "
-                f"{out_p['name']} ➡️ "
-                f"{in_p['name']} "
+                f"{outp['name']} ➡️ "
+                f"{inp['name']} "
                 f"({money})"
             )
 
-            c1, c2, c3 = st.columns(
-                3
-            )
+            c1, c2, c3 = st.columns(3)
 
             c1.metric(
                 "Out xGI/90",
-                f"{out_p['xgi90']:.2f}",
+                f"{outp['xgi90']:.2f}",
             )
 
             c2.metric(
                 "In xGI/90",
-                f"{in_p['xgi90']:.2f}",
+                f"{inp['xgi90']:.2f}",
             )
 
             c3.metric(
                 "Net Projection",
-                f"{suggestion['net_gain']:+.1f}",
+                f"{s['net_gain']:+.1f}",
             )
 
             st.write(
                 f"**Fixtures:** "
-                f"{in_p['fixtures']}"
+                f"{inp['fixtures']}"
             )
 
             st.write(
-                f"**Price trend:** "
-                f"{price_momentum_flag(in_p)}"
+                f"**Elite ownership change:** "
+                f"{s['elite_gain']:+d}"
             )
 
 
@@ -3909,39 +3610,42 @@ with tabs[3]:
 
     else:
 
-        rows = [
-
-            {
-                "Player": p["name"],
-                "Club": p["team"],
-                "Pos": p["position"],
-                "Points": p["points"],
-                "Form": round(
-                    p["form"],
-                    1,
-                ),
-                "xGI/90": round(
-                    p["xgi90"],
-                    2,
-                ),
-                "FDR": round(
-                    p["fdr"],
-                    1,
-                ),
-                "Trend": price_momentum_flag(
-                    p
-                ),
-                "Action": hold_sell(
-                    p
-                ),
-            }
-
-            for p in my_squad
-        ]
-
         st.dataframe(
             pd.DataFrame(
-                rows
+                [
+                    {
+                        "Player":
+                            p["name"],
+                        "Club":
+                            p["team"],
+                        "Pos":
+                            p["position"],
+                        "Points":
+                            p["points"],
+                        "Form":
+                            round(
+                                p["form"],
+                                1,
+                            ),
+                        "xGI/90":
+                            round(
+                                p["xgi90"],
+                                2,
+                            ),
+                        "FDR":
+                            round(
+                                p["fdr"],
+                                1,
+                            ),
+                        "Trend":
+                            price_momentum_flag(
+                                p
+                            ),
+                        "Action":
+                            hold_sell(p),
+                    }
+                    for p in my_squad
+                ]
             ),
             use_container_width=True,
             hide_index=True,
@@ -3966,15 +3670,17 @@ with tabs[4]:
 
     else:
 
-        caps = (
-            captain_recommendations(
-                my_squad
-            )
+        caps = captain_recommendations(
+            my_squad,
+            st.session_state.get(
+                "elite_rows",
+                [],
+            ),
         )
 
         if caps:
 
-            captain = caps[0]
+            cap = caps[0]
 
             vice = (
                 caps[1]
@@ -3982,30 +3688,28 @@ with tabs[4]:
                 else None
             )
 
-            c1, c2 = st.columns(
-                2
-            )
+            c1, c2 = st.columns(2)
 
             with c1:
 
                 st.success(
                     f"👑 CAPTAIN: "
-                    f"**{captain['name']}**"
+                    f"**{cap['name']}**"
                 )
 
                 st.write(
-                    f"{captain['team']} | "
+                    f"{cap['team']} | "
                     f"xGI/90 "
-                    f"{captain['xgi90']:.2f} | "
+                    f"{cap['xgi90']:.2f} | "
                     f"Form "
-                    f"{captain['form']:.1f} | "
+                    f"{cap['form']:.1f} | "
                     f"PPG "
-                    f"{captain['ppg']:.1f}"
+                    f"{cap['ppg']:.1f}"
                 )
 
                 st.write(
                     f"Fixtures: "
-                    f"{captain['fixtures']}"
+                    f"{cap['fixtures']}"
                 )
 
             with c2:
@@ -4029,39 +3733,43 @@ with tabs[4]:
                 "Top Captain Candidates"
             )
 
-            rows = [
-
-                {
-                    "Rank": i,
-                    "Player": p["name"],
-                    "Club": p["team"],
-                    "xGI/90": round(
-                        p["xgi90"],
-                        2,
-                    ),
-                    "Form": round(
-                        p["form"],
-                        1,
-                    ),
-                    "PPG": round(
-                        p["ppg"],
-                        1,
-                    ),
-                    "FDR": round(
-                        p["fdr"],
-                        1,
-                    ),
-                }
-
-                for i, p in enumerate(
-                    caps,
-                    1,
-                )
-            ]
-
             st.dataframe(
                 pd.DataFrame(
-                    rows
+                    [
+                        {
+                            "Rank":
+                                i,
+                            "Player":
+                                p["name"],
+                            "Club":
+                                p["team"],
+                            "xGI/90":
+                                round(
+                                    p["xgi90"],
+                                    2,
+                                ),
+                            "Form":
+                                round(
+                                    p["form"],
+                                    1,
+                                ),
+                            "PPG":
+                                round(
+                                    p["ppg"],
+                                    1,
+                                ),
+                            "FDR":
+                                round(
+                                    p["fdr"],
+                                    1,
+                                ),
+                        }
+                        for i, p
+                        in enumerate(
+                            caps,
+                            1,
+                        )
+                    ]
                 ),
                 use_container_width=True,
                 hide_index=True,
@@ -4103,116 +3811,83 @@ with tabs[5]:
     )
 
     pool = [
-
         p
         for p in players
-
         if (
             position == "ALL"
-            or p[
-                "position"
-            ] == position
+            or p["position"]
+            == position
         )
     ]
 
-    if sort_by == "Model Score":
+    key = {
+        "Model Score":
+            "blended",
+        "xGI/90":
+            "xgi90",
+        "FPL Points":
+            "points",
+        "Form":
+            "form",
+        "PPG":
+            "ppg",
+        "4-GW Projection":
+            "projection_4gw",
+    }[sort_by]
 
-        pool.sort(
-            key=lambda p: p[
-                "blended"
-            ],
-            reverse=True,
-        )
-
-    elif sort_by == "xGI/90":
-
-        pool.sort(
-            key=lambda p: p[
-                "xgi90"
-            ],
-            reverse=True,
-        )
-
-    elif sort_by == "FPL Points":
-
-        pool.sort(
-            key=lambda p: p[
-                "points"
-            ],
-            reverse=True,
-        )
-
-    elif sort_by == "Form":
-
-        pool.sort(
-            key=lambda p: p[
-                "form"
-            ],
-            reverse=True,
-        )
-
-    elif sort_by == "PPG":
-
-        pool.sort(
-            key=lambda p: p[
-                "ppg"
-            ],
-            reverse=True,
-        )
-
-    else:
-
-        pool.sort(
-            key=lambda p: p[
-                "projection_4gw"
-            ],
-            reverse=True,
-        )
-
-    rows = [
-
-        {
-            "Player": p["name"],
-            "Club": p["team"],
-            "Pos": p["position"],
-            "Price": (
-                f"£{p['price']:.1f}m"
-            ),
-            "Points": p["points"],
-            "xGI/90": round(
-                p["xgi90"],
-                2,
-            ),
-            "Form": round(
-                p["form"],
-                1,
-            ),
-            "PPG": round(
-                p["ppg"],
-                1,
-            ),
-            "FDR": round(
-                p["fdr"],
-                1,
-            ),
-            "4GW Projection": round(
-                p[
-                    "projection_4gw"
-                ],
-                1,
-            ),
-            "Model": round(
-                p["blended"],
-                1,
-            ),
-        }
-
-        for p in pool[:75]
-    ]
+    pool.sort(
+        key=lambda p:
+            p[key],
+        reverse=True,
+    )
 
     st.dataframe(
         pd.DataFrame(
-            rows
+            [
+                {
+                    "Player":
+                        p["name"],
+                    "Club":
+                        p["team"],
+                    "Pos":
+                        p["position"],
+                    "Price":
+                        f"£{p['price']:.1f}m",
+                    "Points":
+                        p["points"],
+                    "xGI/90":
+                        round(
+                            p["xgi90"],
+                            2,
+                        ),
+                    "Form":
+                        round(
+                            p["form"],
+                            1,
+                        ),
+                    "PPG":
+                        round(
+                            p["ppg"],
+                            1,
+                        ),
+                    "FDR":
+                        round(
+                            p["fdr"],
+                            1,
+                        ),
+                    "4GW Projection":
+                        round(
+                            p["projection_4gw"],
+                            1,
+                        ),
+                    "Model":
+                        round(
+                            p["blended"],
+                            1,
+                        ),
+                }
+                for p in pool[:75]
+            ]
         ),
         use_container_width=True,
         hide_index=True,
@@ -4231,31 +3906,26 @@ with tabs[6]:
 
     if my_squad:
 
-        st.subheader(
-            "Your Squad"
-        )
-
-        rows = [
-
-            {
-                "Player": p["name"],
-                "Club": p["team"],
-                "Pos": p["position"],
-                "Avg FDR": round(
-                    p["fdr"],
-                    2,
-                ),
-                "Upcoming": p[
-                    "fixtures"
-                ],
-            }
-
-            for p in my_squad
-        ]
-
         st.dataframe(
             pd.DataFrame(
-                rows
+                [
+                    {
+                        "Player":
+                            p["name"],
+                        "Club":
+                            p["team"],
+                        "Pos":
+                            p["position"],
+                        "Avg FDR":
+                            round(
+                                p["fdr"],
+                                2,
+                            ),
+                        "Upcoming":
+                            p["fixtures"],
+                    }
+                    for p in my_squad
+                ]
             ).sort_values(
                 "Avg FDR"
             ),
@@ -4268,20 +3938,19 @@ with tabs[6]:
     )
 
     improving = []
-
     worsening = []
 
-    for team_id in teams:
+    for tid in teams:
 
         near = average_fdr(
             fixture_map,
-            team_id,
+            tid,
             2,
         )
 
         later = average_fdr(
             fixture_map,
-            team_id,
+            tid,
             5,
         )
 
@@ -4290,7 +3959,7 @@ with tabs[6]:
             improving.append(
                 (
                     team_names.get(
-                        team_id,
+                        tid,
                         "?",
                     ),
                     near,
@@ -4303,7 +3972,7 @@ with tabs[6]:
             worsening.append(
                 (
                     team_names.get(
-                        team_id,
+                        tid,
                         "?",
                     ),
                     near,
@@ -4311,18 +3980,7 @@ with tabs[6]:
                 )
             )
 
-    improving.sort(
-        key=lambda x: x[2]
-    )
-
-    worsening.sort(
-        key=lambda x: x[2],
-        reverse=True,
-    )
-
-    c1, c2 = st.columns(
-        2
-    )
+    c1, c2 = st.columns(2)
 
     with c1:
 
@@ -4330,12 +3988,15 @@ with tabs[6]:
             "### 🟢 Getting Easier"
         )
 
-        for name, near, later in improving:
+        for n, a, b in sorted(
+            improving,
+            key=lambda x: x[2],
+        ):
 
             st.write(
-                f"**{name}** — "
-                f"{near:.1f} ➜ "
-                f"{later:.1f}"
+                f"**{n}** — "
+                f"{a:.1f} ➜ "
+                f"{b:.1f}"
             )
 
     with c2:
@@ -4344,12 +4005,16 @@ with tabs[6]:
             "### 🔴 Getting Tougher"
         )
 
-        for name, near, later in worsening:
+        for n, a, b in sorted(
+            worsening,
+            key=lambda x: x[2],
+            reverse=True,
+        ):
 
             st.write(
-                f"**{name}** — "
-                f"{near:.1f} ➜ "
-                f"{later:.1f}"
+                f"**{n}** — "
+                f"{a:.1f} ➜ "
+                f"{b:.1f}"
             )
 
 
@@ -4371,28 +4036,28 @@ with tabs[7]:
 
     else:
 
-        history = team_data.get(
+        h = team_data.get(
             "entry_history",
             {},
         )
 
         bank = (
             num(
-                history.get(
+                h.get(
                     "bank"
                 )
             )
             / 10
         )
 
-        brief = strategy_briefing(
+        b = strategy_briefing(
             my_squad,
             bank,
             free_transfers,
         )
 
         st.info(
-            brief["chip"]
+            b["chip"]
         )
 
         bench = bench_boost_value(
@@ -4404,8 +4069,7 @@ with tabs[7]:
             rows, total = bench
 
             st.subheader(
-                f"🪑 Current GW{current_gw} "
-                f"Bench Check"
+                f"🪑 Current GW{current_gw} Bench Check"
             )
 
             st.dataframe(
@@ -4423,7 +4087,7 @@ with tabs[7]:
 
 
 # ============================================================
-# MINI LEAGUE
+# MINI-LEAGUE
 # ============================================================
 
 with tabs[8]:
@@ -4432,72 +4096,449 @@ with tabs[8]:
         "🕵️ Mini-League"
     )
 
-    if not league_id_input.strip():
+    st.caption(
+        f"{selected_league_name} "
+        f"— League ID {selected_league_id}"
+    )
 
-        st.info(
-            "Enter your Mini-League ID in the sidebar."
+    try:
+
+        league = get_league(
+            selected_league_id
         )
 
-    else:
+        standings = (
+            league
+            .get(
+                "standings",
+                {},
+            )
+            .get(
+                "results",
+                [],
+            )
+        )
 
-        try:
+        # ----------------------------------------------------
+        # FIND USER
+        # ----------------------------------------------------
 
-            league = get_league(
-                safe_int(
-                    league_id_input.strip()
+        my_entry_id = (
+            selected_entry_id
+        )
+
+        my_row = next(
+            (
+                r
+                for r in standings
+                if safe_int(
+                    r.get("entry")
+                )
+                == my_entry_id
+            ),
+            None,
+        )
+
+        # ----------------------------------------------------
+        # LEAGUE SUMMARY
+        # ----------------------------------------------------
+
+        st.subheader(
+            "📊 League Overview"
+        )
+
+        if my_row:
+
+            my_rank = safe_int(
+                my_row.get(
+                    "rank"
                 )
             )
 
-            standings = (
-                league.get(
-                    "standings",
-                    {},
-                ).get(
-                    "results",
-                    [],
-                )[:20]
+            my_total = safe_int(
+                my_row.get(
+                    "total"
+                )
             )
 
-            rows = [
+            my_gw = safe_int(
+                my_row.get(
+                    "event_total"
+                )
+            )
 
-                {
-                    "Rank": row.get(
-                        "rank"
-                    ),
-                    "Manager": row.get(
-                        "player_name"
-                    ),
-                    "Team": row.get(
-                        "entry_name"
-                    ),
-                    "Total": row.get(
+            first_total = (
+                safe_int(
+                    standings[0].get(
                         "total"
-                    ),
-                    "GW": row.get(
-                        "event_total"
-                    ),
-                }
+                    )
+                )
+                if standings
+                else 0
+            )
 
-                for row in standings
+            gap_first = (
+                first_total
+                - my_total
+            )
+
+            above = next(
+                (
+                    r
+                    for r in standings
+                    if safe_int(
+                        r.get("rank")
+                    )
+                    == my_rank - 1
+                ),
+                None,
+            )
+
+            below = next(
+                (
+                    r
+                    for r in standings
+                    if safe_int(
+                        r.get("rank")
+                    )
+                    == my_rank + 1
+                ),
+                None,
+            )
+
+            gap_above = (
+                safe_int(
+                    above.get(
+                        "total"
+                    )
+                )
+                - my_total
+                if above
+                else 0
+            )
+
+            gap_below = (
+                my_total
+                - safe_int(
+                    below.get(
+                        "total"
+                    )
+                )
+                if below
+                else 0
+            )
+
+            c1, c2, c3, c4, c5 = (
+                st.columns(5)
+            )
+
+            c1.metric(
+                "Your Rank",
+                f"#{my_rank}",
+            )
+
+            c2.metric(
+                "Your Total",
+                my_total,
+            )
+
+            c3.metric(
+                "GW Points",
+                my_gw,
+            )
+
+            c4.metric(
+                "Gap to 1st",
+                gap_first,
+            )
+
+            c5.metric(
+                "Gap to Next",
+                gap_above,
+            )
+
+            if above:
+
+                st.info(
+                    f"🎯 **Manager above:** "
+                    f"{above.get('player_name','—')} "
+                    f"({above.get('entry_name','—')}) "
+                    f"— {gap_above} points ahead."
+                )
+
+            if below:
+
+                st.success(
+                    f"🛡️ **Manager below:** "
+                    f"{below.get('player_name','—')} "
+                    f"({below.get('entry_name','—')}) "
+                    f"— you are {gap_below} points ahead."
+                )
+
+        else:
+
+            st.warning(
+                "Your FPL Team is not currently listed in this Mini-League."
+            )
+
+        # ----------------------------------------------------
+        # FULL STANDINGS
+        # ----------------------------------------------------
+
+        st.subheader(
+            "🏆 League Standings"
+        )
+
+        display_standings = standings[:20]
+
+        league_rows = []
+
+        for r in display_standings:
+
+            entry = safe_int(
+                r.get(
+                    "entry"
+                )
+            )
+
+            is_you = (
+                entry
+                == selected_entry_id
+            )
+
+            league_rows.append(
+                {
+                    "Rank":
+                        (
+                            "👉 "
+                            + str(
+                                r.get(
+                                    "rank"
+                                )
+                            )
+                            if is_you
+                            else r.get(
+                                "rank"
+                            )
+                        ),
+                    "Manager":
+                        r.get(
+                            "player_name"
+                        ),
+                    "Team":
+                        r.get(
+                            "entry_name"
+                        ),
+                    "Total":
+                        r.get(
+                            "total"
+                        ),
+                    "GW":
+                        r.get(
+                            "event_total"
+                        ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(
+                league_rows
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ----------------------------------------------------
+        # RIVALS
+        # ----------------------------------------------------
+
+        if my_row:
+
+            st.subheader(
+                "⚔️ Your Immediate Rivals"
+            )
+
+            my_rank = safe_int(
+                my_row.get(
+                    "rank"
+                )
+            )
+
+            rivals = [
+
+                r
+                for r in standings
+
+                if (
+                    my_rank - 3
+                    <= safe_int(
+                        r.get(
+                            "rank"
+                        )
+                    )
+                    <= my_rank + 3
+                )
             ]
+
+            rival_rows = []
+
+            for r in rivals:
+
+                rank = safe_int(
+                    r.get(
+                        "rank"
+                    )
+                )
+
+                total = safe_int(
+                    r.get(
+                        "total"
+                    )
+                )
+
+                gap = (
+                    total
+                    - safe_int(
+                        my_row.get(
+                            "total"
+                        )
+                    )
+                )
+
+                if rank < my_rank:
+
+                    status = (
+                        f"🔴 +{abs(gap)} ahead"
+                    )
+
+                elif rank > my_rank:
+
+                    status = (
+                        f"🟢 {abs(gap)} behind"
+                    )
+
+                else:
+
+                    status = (
+                        "👉 YOU"
+                    )
+
+                rival_rows.append(
+                    {
+                        "Rank":
+                            rank,
+                        "Manager":
+                            r.get(
+                                "player_name"
+                            ),
+                        "Team":
+                            r.get(
+                                "entry_name"
+                            ),
+                        "Total":
+                            total,
+                        "GW":
+                            r.get(
+                                "event_total"
+                            ),
+                        "Gap vs You":
+                            status,
+                    }
+                )
 
             st.dataframe(
                 pd.DataFrame(
-                    rows
+                    rival_rows
                 ),
                 use_container_width=True,
                 hide_index=True,
             )
 
-        except Exception as exc:
+            # ------------------------------------------------
+            # GW PERFORMANCE
+            # ------------------------------------------------
 
-            st.error(
-                "Couldn't retrieve mini-league."
+            st.subheader(
+                "📈 Gameweek Performance"
             )
 
-            st.caption(
-                str(exc)
-            )
+            league_gw_scores = [
+                safe_int(
+                    r.get(
+                        "event_total"
+                    )
+                )
+                for r in standings
+            ]
+
+            if league_gw_scores:
+
+                avg_gw = (
+                    sum(
+                        league_gw_scores
+                    )
+                    / len(
+                        league_gw_scores
+                    )
+                )
+
+                your_gw = safe_int(
+                    my_row.get(
+                        "event_total"
+                    )
+                )
+
+                diff_avg = (
+                    your_gw
+                    - avg_gw
+                )
+
+                c1, c2, c3 = (
+                    st.columns(3)
+                )
+
+                c1.metric(
+                    "Your GW Score",
+                    your_gw,
+                )
+
+                c2.metric(
+                    "League Average",
+                    f"{avg_gw:.1f}",
+                )
+
+                c3.metric(
+                    "Vs League Average",
+                    f"{diff_avg:+.1f}",
+                )
+
+                if diff_avg > 0:
+
+                    st.success(
+                        "📈 You outscored the league average this GW."
+                    )
+
+                elif diff_avg < 0:
+
+                    st.warning(
+                        "📉 You scored below the league average this GW."
+                    )
+
+                else:
+
+                    st.info(
+                        "Your GW score matched the league average."
+                    )
+
+    except Exception as exc:
+
+        st.error(
+            "Couldn't retrieve mini-league."
+        )
+
+        st.caption(
+            str(exc)
+        )
 
 
 # ============================================================
@@ -4512,7 +4553,7 @@ with tabs[9]:
 
     st.caption(
         "IMPORTANT: Best XI can ONLY select "
-        "from your currently loaded 15-man squad."
+        "players from your current 15-man squad."
     )
 
     if not my_squad:
@@ -4536,30 +4577,31 @@ with tabs[9]:
                 f"{result['score']:.1f}"
             )
 
-            rows = [
-
-                {
-                    "Player": p["name"],
-                    "Club": p["team"],
-                    "Pos": p["position"],
-                    "xGI/90": round(
-                        p["xgi90"],
-                        2,
-                    ),
-                    "Model": round(
-                        p["blended"],
-                        1,
-                    ),
-                }
-
-                for p in result[
-                    "lineup"
-                ]
-            ]
-
             st.dataframe(
                 pd.DataFrame(
-                    rows
+                    [
+                        {
+                            "Player":
+                                p["name"],
+                            "Club":
+                                p["team"],
+                            "Pos":
+                                p["position"],
+                            "xGI/90":
+                                round(
+                                    p["xgi90"],
+                                    2,
+                                ),
+                            "Model":
+                                round(
+                                    p["blended"],
+                                    1,
+                                ),
+                        }
+                        for p in result[
+                            "lineup"
+                        ]
+                    ]
                 ),
                 use_container_width=True,
                 hide_index=True,
@@ -4569,26 +4611,26 @@ with tabs[9]:
                 "🪑 Bench"
             )
 
-            bench_rows = [
-
-                {
-                    "Player": p["name"],
-                    "Club": p["team"],
-                    "Pos": p["position"],
-                    "Model": round(
-                        p["blended"],
-                        1,
-                    ),
-                }
-
-                for p in result[
-                    "bench"
-                ]
-            ]
-
             st.dataframe(
                 pd.DataFrame(
-                    bench_rows
+                    [
+                        {
+                            "Player":
+                                p["name"],
+                            "Club":
+                                p["team"],
+                            "Pos":
+                                p["position"],
+                            "Model":
+                                round(
+                                    p["blended"],
+                                    1,
+                                ),
+                        }
+                        for p in result[
+                            "bench"
+                        ]
+                    ]
                 ),
                 use_container_width=True,
                 hide_index=True,
@@ -4597,8 +4639,7 @@ with tabs[9]:
         else:
 
             st.error(
-                "No valid formation could "
-                "be created from your squad."
+                "No valid formation could be created from your squad."
             )
 
 
@@ -4634,17 +4675,12 @@ with tabs[12]:
         "💬 FPL AI Assistant"
     )
 
-    api_key_present = bool(
-        get_secret(
-            "GEMINI_API_KEY"
-        )
-    )
-
-    if not api_key_present:
+    if not get_secret(
+        "GEMINI_API_KEY"
+    ):
 
         st.warning(
-            "GEMINI_API_KEY is missing "
-            "from Streamlit Secrets."
+            "GEMINI_API_KEY is missing from Streamlit Secrets."
         )
 
     else:
@@ -4665,8 +4701,7 @@ with tabs[12]:
         if pin != assistant_pin:
 
             st.info(
-                "🔒 Enter the Manager PIN "
-                "to unlock the assistant."
+                "🔒 Enter the Manager PIN to unlock the assistant."
             )
 
         else:
@@ -4684,25 +4719,20 @@ with tabs[12]:
                     "messages"
                 ] = []
 
-            for message in (
-                st.session_state[
-                    "messages"
-                ]
-            ):
+            for m in st.session_state[
+                "messages"
+            ]:
 
                 with st.chat_message(
-                    message["role"]
+                    m["role"]
                 ):
 
                     st.markdown(
-                        message[
-                            "content"
-                        ]
+                        m["content"]
                     )
 
             prompt = st.chat_input(
-                "Ask about transfers, "
-                "captaincy, fixtures..."
+                "Ask about transfers, captaincy, fixtures..."
             )
 
             if prompt:
@@ -4711,8 +4741,10 @@ with tabs[12]:
                     "messages"
                 ].append(
                     {
-                        "role": "user",
-                        "content": prompt,
+                        "role":
+                            "user",
+                        "content":
+                            prompt,
                     }
                 )
 
@@ -4724,10 +4756,10 @@ with tabs[12]:
                         prompt
                     )
 
-                history = (
+                h = (
                     team_data.get(
                         "entry_history",
-                        {}
+                        {},
                     )
                     if team_data
                     else {}
@@ -4735,44 +4767,51 @@ with tabs[12]:
 
                 bank = (
                     num(
-                        history.get(
+                        h.get(
                             "bank"
                         )
-                    ) / 10
-                    if history
+                    )
+                    / 10
+                    if h
                     else 0
                 )
 
-                squad_text = (
-                    creator_context(
-                        my_squad
-                    )
-                )
-
                 transfer_summary = (
+
+                    transfer_decision(
+                        my_squad,
+                        bank,
+                        free_transfers,
+                        st.session_state.get(
+                            "elite_rows",
+                            [],
+                        ),
+                    )[
+                        "reason"
+                    ]
+
+                    if my_squad
+
+                    else
+
                     "No squad loaded."
                 )
 
-                if my_squad:
-
-                    transfer_summary = (
-                        transfer_decision(
-                            my_squad,
-                            bank,
-                            free_transfers,
-                        )[
-                            "reason"
-                        ]
-                    )
-
                 assistant_prompt = f"""
-FPL current GW: {current_gw}
-Planning GW: {next_gw}
-Free transfers: {free_transfers}
-Bank: £{bank:.1f}m
+FPL current GW:
+{current_gw}
+
+Planning GW:
+{next_gw}
+
+Free transfers:
+{free_transfers}
+
+Bank:
+£{bank:.1f}m
 
 MANAGER SQUAD:
-{squad_text}
+{creator_context(my_squad)}
 
 ELITE MANAGERS:
 {elite_context()}
@@ -4785,15 +4824,25 @@ USER QUESTION:
 
 Give practical FPL advice.
 
-Rules:
+Prioritise the actual squad.
 
-- Prioritise the manager's actual squad.
-- Use supplied data.
-- Consider fixtures, form, xGI/90,
-  xGC/90, availability and projected output.
-- Consider elite consensus if available.
-- Do not invent statistics.
-- Be decisive when the evidence supports it.
+Use supplied data.
+
+Consider:
+- fixtures
+- form
+- xGI/90
+- xGC/90
+- availability
+- projected output
+- elite consensus
+- transfer value
+- captaincy
+- fixture swings
+
+Do not invent statistics.
+Be decisive when the evidence supports it.
+Be honest about uncertainty.
 """
 
                 with st.chat_message(
@@ -4809,14 +4858,7 @@ Rules:
                             answer, model = (
                                 gemini_generate(
                                     assistant_prompt,
-                                    (
-                                        "You are an elite "
-                                        "FPL strategist. "
-                                        "Be practical, "
-                                        "data-led and "
-                                        "honest about "
-                                        "uncertainty."
-                                    ),
+                                    "You are an elite FPL strategist. Be practical, data-led and honest about uncertainty.",
                                 )
                             )
 
@@ -4832,8 +4874,10 @@ Rules:
                                 "messages"
                             ].append(
                                 {
-                                    "role": "assistant",
-                                    "content": answer,
+                                    "role":
+                                        "assistant",
+                                    "content":
+                                        answer,
                                 }
                             )
 
@@ -4858,5 +4902,6 @@ st.caption(
     "⚽ FPL Assistant Manager — "
     "Official FPL API + underlying metrics + "
     "Elite Manager consensus + "
-    "YouTube Creator Intelligence."
+    "YouTube Creator Intelligence + "
+    "Mini-League Rival Analysis"
 )
