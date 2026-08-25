@@ -2,4 +2,4 @@ streamlit
 requests
 pandas
 google-genai
-youtube-transcript-api
+youtube-transcript-api 
