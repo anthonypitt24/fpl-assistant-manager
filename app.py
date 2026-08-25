@@ -6,59 +6,50 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# Optional Gemini
+try:
+    from google import genai
+    from google.genai import types
+except Exception:
+    genai = None
+    types = None
+
+# Optional YouTube transcripts
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+except Exception:
+    YouTubeTranscriptApi = None
+
 
 # ============================================================
 # FPL ASSISTANT MANAGER
 # ============================================================
-# LIGHT / STABLE VERSION
+# Designed to be:
+# - Fast
+# - Lightweight
+# - Personal-use friendly
+# - Resistant to API overload
 #
-# FEATURES
-# ------------------------------------------------------------
+# Main data:
 # - Official FPL API
-# - Your 15-man squad
-# - Strategy briefing
-# - Transfer engine
-# - Hold / Sell
-# - Captain / Vice
-# - Player rankings
-# - Fixture swings
-# - Chip analysis
-# - Mini-league
-# - Best XI using ONLY your squad
-# - Elite Manager Tracker
-# - Elite squad / captain / transfer consensus
-# - Team-ID verification
-# - YouTube creator transcript analysis
-# - Gemini AI assistant
+# - Team recent form calculated from FPL fixtures
+# - Optional betting-market signal
+# - Elite manager tracking
+# - YouTube creator analysis
+# - Gemini AI
 #
-# IMPORTANT PERFORMANCE CHANGE
-# ------------------------------------------------------------
-# Elite managers are NOT loaded when the app starts.
-#
-# They are loaded only when you press the button inside
-# the Elite Managers tab.
-#
-# This prevents a large number of FPL API requests happening
-# every time Streamlit reruns the application.
-#
-# The conflicting-signals system is NOT included.
+# IMPORTANT:
+# Elite managers are loaded ONLY when their tab is opened.
+# This prevents the whole app from waiting for multiple
+# external requests on every page load.
 # ============================================================
 
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
 
 st.set_page_config(
     page_title="FPL Assistant Manager",
     page_icon="⚽",
     layout="wide",
 )
-
-
-# ============================================================
-# CONSTANTS
-# ============================================================
 
 API = "https://fantasy.premierleague.com/api"
 
@@ -70,9 +61,11 @@ HEADERS = {
 }
 
 FIXTURE_HORIZON = 5
+FORM_MATCHES = 5
 PROJECTION_WEEKS = 4
 MAX_PER_CLUB = 3
 TRANSFER_HIT = 4
+
 
 VALID_FORMATIONS = [
     (3, 4, 3),
@@ -87,16 +80,8 @@ VALID_FORMATIONS = [
 
 
 # ============================================================
-# GEMINI
+# GEMINI MODELS
 # ============================================================
-
-try:
-    from google import genai
-    from google.genai import types
-except Exception:
-    genai = None
-    types = None
-
 
 GEMINI_MODELS = [
     "gemini-3.7-flash",
@@ -106,23 +91,7 @@ GEMINI_MODELS = [
 
 
 # ============================================================
-# YOUTUBE
-# ============================================================
-
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi
-except Exception:
-    YouTubeTranscriptApi = None
-
-
-# ============================================================
 # ELITE MANAGERS
-# ============================================================
-#
-# Only use IDs we have chosen to hard-code.
-# Unknown IDs remain None.
-#
-# This is deliberately NOT automatically loaded.
 # ============================================================
 
 ELITE_MANAGERS = {
@@ -163,21 +132,49 @@ CREATOR_CHANNELS = {
 
 
 # ============================================================
-# SESSION STATE
+# BASIC HELPERS
 # ============================================================
 
-if "elite_rows" not in st.session_state:
-    st.session_state.elite_rows = None
+def num(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-if "elite_loaded_gw" not in st.session_state:
-    st.session_state.elite_loaded_gw = None
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_secret(name, default=None):
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+
+def availability_factor(player):
+    chance = num(player.get("chance"), 100)
+
+    if chance >= 90:
+        return 1.0
+    if chance >= 75:
+        return 0.85
+    if chance >= 50:
+        return 0.60
+    if chance > 0:
+        return 0.30
+
+    return 0.0
 
 
 # ============================================================
-# API HELPERS
+# API
 # ============================================================
 
 @st.cache_data(
@@ -188,7 +185,7 @@ def api_get(url):
     response = requests.get(
         url,
         headers=HEADERS,
-        timeout=20,
+        timeout=15,
     )
 
     response.raise_for_status()
@@ -227,7 +224,7 @@ def get_entry_transfers(entry_id):
 
 
 @st.cache_data(
-    ttl=300,
+    ttl=600,
     show_spinner=False,
 )
 def get_league(league_id):
@@ -237,7 +234,7 @@ def get_league(league_id):
 
 
 @st.cache_data(
-    ttl=600,
+    ttl=900,
     show_spinner=False,
 )
 def get_team_history(entry_id):
@@ -271,57 +268,7 @@ def get_live_gw(gameweek):
 
 
 # ============================================================
-# BASIC HELPERS
-# ============================================================
-
-def num(value, default=0.0):
-    try:
-        if value is None or value == "":
-            return default
-
-        return float(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return default
-
-
-def safe_int(value, default=0):
-    try:
-        return int(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return default
-
-
-def availability_factor(player):
-    chance = num(
-        player.get("chance"),
-        100,
-    )
-
-    if chance >= 90:
-        return 1.0
-
-    if chance >= 75:
-        return 0.85
-
-    if chance >= 50:
-        return 0.60
-
-    if chance > 0:
-        return 0.30
-
-    return 0.0
-
-
-# ============================================================
-# FIXTURE HELPERS
+# FIXTURE FUNCTIONS
 # ============================================================
 
 def average_fdr(
@@ -330,10 +277,7 @@ def average_fdr(
     weeks=None,
 ):
     games = sorted(
-        fixture_map.get(
-            team_id,
-            [],
-        ),
+        fixture_map.get(team_id, []),
         key=lambda x: (
             x["gw"],
             not x["home"],
@@ -396,7 +340,6 @@ def fixture_text(
     output = []
 
     for fixture in games:
-
         opponent = team_names.get(
             fixture["opponent"],
             "?",
@@ -418,43 +361,214 @@ def fixture_text(
     return " | ".join(output)
 
 
-def price_momentum_flag(player):
-    net = num(
-        player.get("net_transfers")
-    )
+# ============================================================
+# TEAM FORM
+# ============================================================
 
-    ownership = max(
-        num(
-            player.get("ownership")
+def calculate_team_form(
+    fixtures_raw,
+    teams,
+    current_gw,
+):
+    """
+    Calculates recent form from completed FPL fixtures.
+
+    No additional API is required.
+    """
+
+    form = {}
+
+    for team_id in teams:
+        form[team_id] = {
+            "played": 0,
+            "wins": 0,
+            "draws": 0,
+            "losses": 0,
+            "goals_for": 0,
+            "goals_against": 0,
+            "clean_sheets": 0,
+            "recent_results": [],
+        }
+
+    completed = [
+        f
+        for f in fixtures_raw
+        if (
+            f.get("event") is not None
+            and safe_int(
+                f.get("event"),
+                0,
+            ) < current_gw
+            and f.get("team_h") is not None
+            and f.get("team_a") is not None
+            and f.get("team_h_score") is not None
+            and f.get("team_a_score") is not None
+        )
+    ]
+
+    completed.sort(
+        key=lambda f: safe_int(
+            f.get("event"),
+            0,
         ),
-        0.1,
+        reverse=True,
     )
 
-    ratio = net / (
-        ownership * 1000
-    )
+    for fixture in completed:
+        home = fixture.get("team_h")
+        away = fixture.get("team_a")
 
-    if ratio > 0.4:
-        return "📈 Likely rise"
+        home_score = safe_int(
+            fixture.get("team_h_score"),
+            0,
+        )
 
-    if ratio < -0.4:
-        return "📉 Likely fall"
+        away_score = safe_int(
+            fixture.get("team_a_score"),
+            0,
+        )
 
-    return "— Stable"
+        if home not in form or away not in form:
+            continue
+
+        # Home
+        h = form[home]
+
+        h["played"] += 1
+        h["goals_for"] += home_score
+        h["goals_against"] += away_score
+
+        if away_score == 0:
+            h["clean_sheets"] += 1
+
+        if home_score > away_score:
+            h["wins"] += 1
+            result = "W"
+        elif home_score == away_score:
+            h["draws"] += 1
+            result = "D"
+        else:
+            h["losses"] += 1
+            result = "L"
+
+        h["recent_results"].append(result)
+
+        # Away
+        a = form[away]
+
+        a["played"] += 1
+        a["goals_for"] += away_score
+        a["goals_against"] += home_score
+
+        if home_score == 0:
+            a["clean_sheets"] += 1
+
+        if away_score > home_score:
+            a["wins"] += 1
+            result = "W"
+        elif away_score == home_score:
+            a["draws"] += 1
+            result = "D"
+        else:
+            a["losses"] += 1
+            result = "L"
+
+        a["recent_results"].append(result)
+
+    # Keep only most recent five results
+    for team_id, data in form.items():
+
+        data["recent_results"] = (
+            data["recent_results"][:FORM_MATCHES]
+        )
+
+        played = len(
+            data["recent_results"]
+        )
+
+        if played:
+            points = (
+                data["wins"] * 3
+                + data["draws"]
+            )
+
+            data["points_per_game"] = (
+                points / played
+            )
+
+            data["goals_per_game"] = (
+                data["goals_for"]
+                / played
+            )
+
+            data["conceded_per_game"] = (
+                data["goals_against"]
+                / played
+            )
+
+            data["clean_sheet_rate"] = (
+                data["clean_sheets"]
+                / played
+            )
+
+            # 0-10 form score
+            score = (
+                data["points_per_game"] / 3 * 5
+                + min(
+                    data["goals_per_game"],
+                    3,
+                ) / 3 * 2
+                + data["clean_sheet_rate"] * 2
+                + max(
+                    0,
+                    1
+                    - data["conceded_per_game"]
+                    / 3,
+                )
+            )
+
+            data["form_score"] = round(
+                min(
+                    max(score, 0),
+                    10,
+                ),
+                1,
+            )
+
+        else:
+            data["points_per_game"] = 0
+            data["goals_per_game"] = 0
+            data["conceded_per_game"] = 0
+            data["clean_sheet_rate"] = 0
+            data["form_score"] = 5.0
+
+    return form
+
+
+def team_form_label(form_score):
+    if form_score >= 8:
+        return "🔥 Excellent"
+    if form_score >= 6.5:
+        return "🟢 Strong"
+    if form_score >= 5:
+        return "🟡 Average"
+    if form_score >= 3.5:
+        return "🟠 Poor"
+
+    return "🔴 Very Poor"
 
 
 # ============================================================
-# MODEL
+# PLAYER MODEL
 # ============================================================
 
 def calc_blended_score(player):
-
     ppg = min(
         num(player["ppg"]) * 1.5,
         10,
     )
 
-    form = min(
+    player_form = min(
         num(player["form"]) * 1.2,
         9,
     )
@@ -466,25 +580,17 @@ def calc_blended_score(player):
 
     fixture = max(
         0,
-        (
-            3.2
-            - num(
-                player["fdr"],
-                3,
-            )
-        ) * 3,
+        (3.2 - num(player["fdr"], 3))
+        * 3,
     )
 
     availability = (
-        availability_factor(
-            player
-        ) * 5
+        availability_factor(player)
+        * 5
     )
 
     attacking = min(
-        num(
-            player["xgi90"]
-        ) * 8,
+        num(player["xgi90"]) * 8,
         12,
     )
 
@@ -501,15 +607,27 @@ def calc_blended_score(player):
                 - num(
                     player["xgc90"]
                 )
-            ) * 4,
+            )
+            * 4,
         )
+
+    team_form_score = num(
+        player.get(
+            "team_form_score",
+            5,
+        ),
+        5,
+    )
+
+    # Team form contributes a modest amount.
+    team_form_bonus = (
+        team_form_score - 5
+    ) * 1.2
 
     dgw_bonus = (
         7
         if safe_int(
-            player[
-                "next_gw_fixtures"
-            ]
+            player["next_gw_fixtures"]
         ) >= 2
         else 0
     )
@@ -517,9 +635,7 @@ def calc_blended_score(player):
     bgw_penalty = (
         8
         if safe_int(
-            player[
-                "next_gw_fixtures"
-            ]
+            player["next_gw_fixtures"]
         ) == 0
         else 0
     )
@@ -527,24 +643,21 @@ def calc_blended_score(player):
     ownership_bonus = (
         2
         if (
-            num(
-                player["ownership"]
-            ) < 5
-            and num(
-                player["xgi90"]
-            ) >= 0.25
+            num(player["ownership"]) < 5
+            and num(player["xgi90"]) >= 0.25
         )
         else 0
     )
 
     score = (
         ppg
-        + form
+        + player_form
         + expected
         + fixture
         + availability
         + attacking
         + defensive
+        + team_form_bonus
         + dgw_bonus
         + ownership_bonus
         - bgw_penalty
@@ -582,21 +695,30 @@ def calc_multi_gw_projection(
     )
 
     base = (
-        num(
-            player["ep_next"]
-        ) * 0.55
-        + num(
-            player["ppg"]
-        ) * 0.20
-        + num(
-            player["xgi90"]
-        ) * 2.0
+        num(player["ep_next"]) * 0.55
+        + num(player["ppg"]) * 0.20
+        + num(player["xgi90"]) * 2.0
+    )
+
+    # Small adjustment for recent team form.
+    team_form = num(
+        player.get(
+            "team_form_score",
+            5,
+        ),
+        5,
+    )
+
+    form_multiplier = (
+        0.9
+        + (
+            team_form / 10
+        ) * 0.2
     )
 
     total = 0.0
 
     for fixture in games:
-
         difficulty = num(
             fixture["difficulty"],
             3,
@@ -614,6 +736,7 @@ def calc_multi_gw_projection(
             base
             * multiplier
             * availability
+            * form_multiplier
         )
 
     return round(
@@ -623,7 +746,7 @@ def calc_multi_gw_projection(
 
 
 # ============================================================
-# LOAD OFFICIAL FPL DATA
+# LOAD FPL DATA
 # ============================================================
 
 @st.cache_data(
@@ -694,24 +817,20 @@ def load_fpl_data():
     )
 
     if current_event:
-
         current_gw = safe_int(
             current_event.get("id"),
             1,
         )
-
     elif next_event:
-
         current_gw = max(
             safe_int(
                 next_event.get("id"),
                 1,
-            ) - 1,
+            )
+            - 1,
             1,
         )
-
     else:
-
         current_gw = 1
 
     next_gw = (
@@ -723,11 +842,17 @@ def load_fpl_data():
         else current_gw + 1
     )
 
+    # --------------------------------------------------------
+    # Future fixture map
+    # --------------------------------------------------------
+
     fixture_map = defaultdict(list)
 
     for fixture in fixtures_raw:
 
-        gw = fixture.get("event")
+        gw = fixture.get(
+            "event"
+        )
 
         if gw is None:
             continue
@@ -751,9 +876,7 @@ def load_fpl_data():
 
         if home:
 
-            fixture_map[
-                home
-            ].append(
+            fixture_map[home].append(
                 {
                     "gw": safe_int(gw),
                     "home": True,
@@ -769,9 +892,7 @@ def load_fpl_data():
 
         if away:
 
-            fixture_map[
-                away
-            ].append(
+            fixture_map[away].append(
                 {
                     "gw": safe_int(gw),
                     "home": False,
@@ -784,6 +905,20 @@ def load_fpl_data():
                     ),
                 }
             )
+
+    # --------------------------------------------------------
+    # Team form
+    # --------------------------------------------------------
+
+    team_form = calculate_team_form(
+        fixtures_raw,
+        teams,
+        current_gw,
+    )
+
+    # --------------------------------------------------------
+    # Players
+    # --------------------------------------------------------
 
     players = []
 
@@ -812,8 +947,12 @@ def load_fpl_data():
             )
         )
 
-        player = {
+        player_team_form = team_form.get(
+            team_id,
+            {},
+        )
 
+        player = {
             "id": raw.get("id"),
 
             "name": raw.get(
@@ -827,9 +966,7 @@ def load_fpl_data():
             ).strip(),
 
             "position": positions.get(
-                raw.get(
-                    "element_type"
-                ),
+                raw.get("element_type"),
                 "?",
             ),
 
@@ -840,18 +977,12 @@ def load_fpl_data():
                 "?",
             ),
 
-            "price": (
-                num(
-                    raw.get(
-                        "now_cost"
-                    )
-                ) / 10
-            ),
+            "price": num(
+                raw.get("now_cost")
+            ) / 10,
 
             "points": safe_int(
-                raw.get(
-                    "total_points"
-                )
+                raw.get("total_points")
             ),
 
             "ppg": num(
@@ -869,9 +1000,7 @@ def load_fpl_data():
             ),
 
             "goals": safe_int(
-                raw.get(
-                    "goals_scored"
-                )
+                raw.get("goals_scored")
             ),
 
             "assists": safe_int(
@@ -879,9 +1008,7 @@ def load_fpl_data():
             ),
 
             "clean_sheets": safe_int(
-                raw.get(
-                    "clean_sheets"
-                )
+                raw.get("clean_sheets")
             ),
 
             "bonus": safe_int(
@@ -930,9 +1057,7 @@ def load_fpl_data():
             ),
 
             "ict": num(
-                raw.get(
-                    "ict_index"
-                )
+                raw.get("ict_index")
             ),
 
             "transfers_in": transfers_in,
@@ -949,6 +1074,34 @@ def load_fpl_data():
                     "cost_change_event"
                 )
             ),
+
+            # Team form
+            "team_form_score": player_team_form.get(
+                "form_score",
+                5,
+            ),
+
+            "team_form_results": (
+                player_team_form.get(
+                    "recent_results",
+                    [],
+                )
+            ),
+
+            "team_goals_for": player_team_form.get(
+                "goals_for",
+                0,
+            ),
+
+            "team_goals_against": player_team_form.get(
+                "goals_against",
+                0,
+            ),
+
+            "team_clean_sheets": player_team_form.get(
+                "clean_sheets",
+                0,
+            ),
         }
 
         player["fdr"] = average_fdr(
@@ -956,9 +1109,7 @@ def load_fpl_data():
             team_id,
         )
 
-        player[
-            "next_gw_fixtures"
-        ] = fixture_count(
+        player["next_gw_fixtures"] = fixture_count(
             fixture_map,
             team_id,
             next_gw,
@@ -971,15 +1122,12 @@ def load_fpl_data():
             FIXTURE_HORIZON,
         )
 
-        player["blended"] = (
-            calc_blended_score(
-                player
-            )
+        # Score calculated after all inputs exist
+        player["blended"] = calc_blended_score(
+            player
         )
 
-        player[
-            "projection_4gw"
-        ] = calc_multi_gw_projection(
+        player["projection_4gw"] = calc_multi_gw_projection(
             player,
             fixture_map,
         )
@@ -988,8 +1136,10 @@ def load_fpl_data():
 
     return {
         "bootstrap": bootstrap,
+        "fixtures_raw": fixtures_raw,
         "teams": teams,
         "team_names": team_names,
+        "team_form": team_form,
         "current_gw": current_gw,
         "next_gw": next_gw,
         "fixture_map": dict(
@@ -999,14 +1149,13 @@ def load_fpl_data():
         "player_by_id": {
             p["id"]: p
             for p in players
-            if p.get("id")
-            is not None
+            if p.get("id") is not None
         },
     }
 
 
 # ============================================================
-# START FPL DATA
+# LOAD DATA
 # ============================================================
 
 try:
@@ -1028,6 +1177,7 @@ except Exception as exc:
 
 teams = DATA["teams"]
 team_names = DATA["team_names"]
+team_form = DATA["team_form"]
 current_gw = DATA["current_gw"]
 next_gw = DATA["next_gw"]
 fixture_map = DATA["fixture_map"]
@@ -1101,6 +1251,40 @@ def hold_sell(player):
         return "🟢 STRONG HOLD"
 
     return "🟡 MONITOR"
+
+
+def price_momentum_flag(player):
+
+    net = num(
+        player.get(
+            "net_transfers"
+        )
+    )
+
+    ownership = max(
+        num(
+            player.get(
+                "ownership"
+            )
+        ),
+        0.1,
+    )
+
+    ratio = (
+        net
+        / (
+            ownership
+            * 1000
+        )
+    )
+
+    if ratio > 0.4:
+        return "📈 Likely rise"
+
+    if ratio < -0.4:
+        return "📉 Likely fall"
+
+    return "— Stable"
 
 
 # ============================================================
@@ -1181,7 +1365,7 @@ def squad_club_counts(
 
 
 # ============================================================
-# TRANSFERS
+# TRANSFER ENGINE
 # ============================================================
 
 def transfer_suggestions(
@@ -1209,11 +1393,15 @@ def transfer_suggestions(
             if (
                 p["position"]
                 == outgoing["position"]
+
                 and p["id"]
                 not in owned_ids
+
                 and p["status"]
                 == "a"
-                and p["chance"] > 0
+
+                and p["chance"]
+                > 0
             )
         ]
 
@@ -1222,7 +1410,7 @@ def transfer_suggestions(
             reverse=True,
         )
 
-        for incoming in candidates[:50]:
+        for incoming in candidates[:40]:
 
             available = (
                 bank
@@ -1235,11 +1423,9 @@ def transfer_suggestions(
             ):
                 continue
 
-            projected_count = (
-                club_counts[
-                    incoming["team_id"]
-                ]
-            )
+            projected_count = club_counts[
+                incoming["team_id"]
+            ]
 
             if (
                 incoming["team_id"]
@@ -1325,8 +1511,8 @@ def transfer_decision(
             "decision": "ROLL",
             "reason": (
                 "No available transfer "
-                "clears the model's minimum "
-                "projected-improvement "
+                "clears the model's "
+                "minimum improvement "
                 "threshold."
             ),
             "suggestions": [],
@@ -1359,13 +1545,17 @@ def transfer_decision(
 
             reason = (
                 "An upgrade exists, "
-                "but it is not large enough "
-                "to justify using the transfer."
+                "but it is not large "
+                "enough to justify "
+                "using the transfer."
             )
 
     else:
 
-        if best["net_gain"] >= 2:
+        if (
+            best["net_gain"]
+            >= 2
+        ):
 
             decision = "TAKE HIT"
 
@@ -1382,8 +1572,8 @@ def transfer_decision(
             decision = "ROLL"
 
             reason = (
-                "The best move does not "
-                "justify the -4."
+                "The best move does "
+                "not justify the -4."
             )
 
     return {
@@ -1397,9 +1587,7 @@ def transfer_decision(
 # CAPTAIN
 # ============================================================
 
-def captain_recommendations(
-    squad
-):
+def captain_recommendations(squad):
 
     available = [
         p
@@ -1420,16 +1608,16 @@ def captain_recommendations(
             ) * 1.5
             + max(
                 0,
-                3 - num(
+                3
+                - num(
                     p["fdr"],
                     3,
                 ),
             ) * 1.5
             + (
                 4
-                if p[
-                    "next_gw_fixtures"
-                ] >= 2
+                if p["next_gw_fixtures"]
+                >= 2
                 else 0
             )
         )
@@ -1444,10 +1632,6 @@ def captain_recommendations(
 
 # ============================================================
 # BEST XI
-# ============================================================
-#
-# IMPORTANT:
-# ONLY your current 15-man squad is considered.
 # ============================================================
 
 def best_xi(squad):
@@ -1527,8 +1711,8 @@ def best_xi(squad):
             best_score = score
 
             lineup_ids = {
-                x["id"]
-                for x in lineup
+                p["id"]
+                for p in lineup
             }
 
             best = {
@@ -1548,16 +1732,17 @@ def best_xi(squad):
     return best
 
 
+# ============================================================
+# BENCH BOOST
+# ============================================================
+
 def bench_boost_value(squad):
 
     try:
-
         live = get_live_gw(
             current_gw
         )
-
     except Exception:
-
         return None
 
     bench = [
@@ -1592,16 +1777,13 @@ def bench_boost_value(squad):
 
 
 # ============================================================
-# ELITE MANAGER FUNCTIONS
+# ELITE MANAGERS
 # ============================================================
 
 def verify_team_id(entry_id):
 
     if not entry_id:
-        return (
-            None,
-            "No ID configured",
-        )
+        return None, "No ID configured"
 
     try:
 
@@ -1621,10 +1803,7 @@ def verify_team_id(entry_id):
                 "FPL API returned no team",
             )
 
-        return (
-            info,
-            "Verified",
-        )
+        return info, "Verified"
 
     except Exception as exc:
 
@@ -1646,16 +1825,14 @@ def load_elite_manager(
             "status": "UNVERIFIED",
             "error": (
                 "No verified Team ID "
-                "hard-coded."
+                "configured."
             ),
             "squad": [],
             "transfers": [],
         }
 
-    info, verification = (
-        verify_team_id(
-            entry_id
-        )
+    info, verification = verify_team_id(
+        entry_id
     )
 
     if not info:
@@ -1682,16 +1859,13 @@ def load_elite_manager(
         )
 
         squad = []
-
         captain = None
         vice = None
 
         for pick in picks:
 
             p = player_by_id.get(
-                pick.get(
-                    "element"
-                )
+                pick.get("element")
             )
 
             if not p:
@@ -1715,14 +1889,8 @@ def load_elite_manager(
 
         try:
 
-            transfer_data = (
-                get_entry_transfers(
-                    entry_id
-                )
-            )
-
-            for transfer in (
-                transfer_data
+            for transfer in get_entry_transfers(
+                entry_id
             ):
 
                 if (
@@ -1733,19 +1901,15 @@ def load_elite_manager(
                 ):
                     continue
 
-                out_p = (
-                    player_by_id.get(
-                        transfer.get(
-                            "element_out"
-                        )
+                out_p = player_by_id.get(
+                    transfer.get(
+                        "element_out"
                     )
                 )
 
-                in_p = (
-                    player_by_id.get(
-                        transfer.get(
-                            "element_in"
-                        )
+                in_p = player_by_id.get(
+                    transfer.get(
+                        "element_in"
                     )
                 )
 
@@ -1838,31 +2002,7 @@ def load_elite_manager(
         }
 
 
-def load_all_elite():
-
-    rows = []
-
-    for name, meta in (
-        ELITE_MANAGERS.items()
-    ):
-
-        rows.append(
-            load_elite_manager(
-                name,
-                meta["entry_id"],
-            )
-        )
-
-    return rows
-
-
-# ============================================================
-# ELITE CONSENSUS
-# ============================================================
-
-def elite_consensus(
-    elite_rows
-):
+def elite_consensus(elite_rows):
 
     valid = [
         row
@@ -1877,22 +2017,11 @@ def elite_consensus(
     total = len(valid)
 
     if not total:
-        return (
-            [],
-            [],
-            [],
-            [],
-        )
+        return [], [], [], []
 
     counts = defaultdict(int)
-
-    captain_counts = defaultdict(
-        int
-    )
-
-    transfer_counts = defaultdict(
-        int
-    )
+    captain_counts = defaultdict(int)
+    transfer_counts = defaultdict(int)
 
     for row in valid:
 
@@ -1963,6 +2092,10 @@ def elite_consensus(
                     blended_score(p),
                     1,
                 ),
+                "Team Form": round(
+                    p["team_form_score"],
+                    1,
+                ),
                 "FDR": round(
                     p["fdr"],
                     1,
@@ -2012,534 +2145,13 @@ def elite_consensus(
 
 
 # ============================================================
-# ELITE TRACKER UI
-# ============================================================
-
-def render_elite_tracker(
-    my_squad
-):
-
-    st.header(
-        "🏆 Elite Manager Tracker"
-    )
-
-    st.caption(
-        "Elite managers are loaded only when "
-        "you request them. This prevents them "
-        "slowing down the main application."
-    )
-
-    st.info(
-        "Managers currently configured: "
-        "Abinav C, John Walsh, FPL Harry, "
-        "Keilan Kenny and Nick (FPL Spartan)."
-    )
-
-    if st.button(
-        "🔄 Load / Refresh Elite Managers",
-        type="primary",
-        key="load_elite",
-    ):
-
-        with st.spinner(
-            "Following elite managers..."
-        ):
-
-            try:
-
-                st.session_state.elite_rows = (
-                    load_all_elite()
-                )
-
-                st.session_state.elite_loaded_gw = (
-                    current_gw
-                )
-
-            except Exception as exc:
-
-                st.error(
-                    "Elite manager loading failed."
-                )
-
-                st.code(
-                    str(exc)
-                )
-
-                return
-
-    elite_rows = (
-        st.session_state.elite_rows
-    )
-
-    if not elite_rows:
-
-        st.warning(
-            "Elite managers have not been loaded yet."
-        )
-
-        st.write(
-            "Press **Load / Refresh Elite Managers** "
-            "above when you want to use this feature."
-        )
-
-        return
-
-    st.caption(
-        f"Elite data loaded for GW{current_gw}."
-    )
-
-    # --------------------------------------------------------
-    # VERIFICATION
-    # --------------------------------------------------------
-
-    with st.expander(
-        "🔐 Team ID verification",
-        expanded=False,
-    ):
-
-        verification_rows = []
-
-        for name, meta in (
-            ELITE_MANAGERS.items()
-        ):
-
-            entry_id = meta[
-                "entry_id"
-            ]
-
-            if entry_id:
-
-                row = next(
-                    (
-                        r
-                        for r in elite_rows
-                        if r["name"]
-                        == name
-                    ),
-                    None,
-                )
-
-                verified = (
-                    row
-                    and row.get(
-                        "status"
-                    )
-                    == "OK"
-                )
-
-                verification_rows.append(
-                    {
-                        "Manager": name,
-                        "HOF Rank": meta[
-                            "hall_of_fame"
-                        ],
-                        "Team ID": entry_id,
-                        "Verification": (
-                            "✅ VERIFIED"
-                            if verified
-                            else "❌ FAILED"
-                        ),
-                        "FPL Team": (
-                            row.get(
-                                "entry_name",
-                                "—",
-                            )
-                            if row
-                            else "—"
-                        ),
-                    }
-                )
-
-            else:
-
-                verification_rows.append(
-                    {
-                        "Manager": name,
-                        "HOF Rank": meta[
-                            "hall_of_fame"
-                        ],
-                        "Team ID": "Not known",
-                        "Verification": (
-                            "🟠 NOT VERIFIED"
-                        ),
-                        "FPL Team": "—",
-                    }
-                )
-
-        st.dataframe(
-            pd.DataFrame(
-                verification_rows
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # --------------------------------------------------------
-    # OVERVIEW
-    # --------------------------------------------------------
-
-    overview = []
-
-    for row in elite_rows:
-
-        overview.append(
-            {
-                "Manager": row["name"],
-                "HOF": ELITE_MANAGERS[
-                    row["name"]
-                ]["hall_of_fame"],
-                "Status": (
-                    "🟢 Connected"
-                    if row.get(
-                        "status"
-                    )
-                    == "OK"
-                    else (
-                        "🟠 ID not verified"
-                        if row.get(
-                            "status"
-                        )
-                        == "UNVERIFIED"
-                        else "🔴 Failed"
-                    )
-                ),
-                "GW Points": row.get(
-                    "gw_points",
-                    "—",
-                ),
-                "Overall Rank": row.get(
-                    "overall_rank",
-                    "—",
-                ),
-                "Captain": row.get(
-                    "captain",
-                    "—",
-                ),
-                "Transfers": len(
-                    row.get(
-                        "transfers",
-                        [],
-                    )
-                ),
-            }
-        )
-
-    st.dataframe(
-        pd.DataFrame(
-            overview
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    # --------------------------------------------------------
-    # CONSENSUS
-    # --------------------------------------------------------
-
-    (
-        consensus,
-        captains,
-        transfers,
-        valid,
-    ) = elite_consensus(
-        elite_rows
-    )
-
-    if not valid:
-
-        st.warning(
-            "No elite teams are currently connected."
-        )
-
-        return
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "Managers Connected",
-        f"{len(valid)}/5",
-    )
-
-    c2.metric(
-        "Captain Leader",
-        (
-            captains[0]["Captain"]
-            if captains
-            else "—"
-        ),
-    )
-
-    c3.metric(
-        "Captain Consensus",
-        (
-            captains[0]["Managers"]
-            if captains
-            else "—"
-        ),
-    )
-
-    # --------------------------------------------------------
-    # MOST OWNED
-    # --------------------------------------------------------
-
-    st.subheader(
-        "🔥 Most-Owned Elite Players"
-    )
-
-    if consensus:
-
-        st.dataframe(
-            pd.DataFrame(
-                consensus[:30]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # --------------------------------------------------------
-    # CAPTAIN / TRANSFERS
-    # --------------------------------------------------------
-
-    left, right = st.columns(2)
-
-    with left:
-
-        st.subheader(
-            "🧢 Captain Consensus"
-        )
-
-        if captains:
-
-            st.dataframe(
-                pd.DataFrame(
-                    captains
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-
-            st.info(
-                "No captain data yet."
-            )
-
-    with right:
-
-        st.subheader(
-            "🔄 Elite Transfers"
-        )
-
-        if transfers:
-
-            st.dataframe(
-                pd.DataFrame(
-                    transfers
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-
-            st.info(
-                "No current-GW transfers recorded."
-            )
-
-    # --------------------------------------------------------
-    # ELITE VS USER
-    # --------------------------------------------------------
-
-    st.divider()
-
-    st.subheader(
-        "🆚 Elite Managers vs Your Team"
-    )
-
-    if not my_squad:
-
-        st.info(
-            "Load your FPL Team ID in the sidebar."
-        )
-
-    else:
-
-        owned = {
-            p["id"]
-            for p in my_squad
-        }
-
-        threshold = max(
-            2,
-            (
-                len(valid)
-                + 1
-            ) // 2,
-        )
-
-        comparison = []
-
-        for row in consensus:
-
-            count = safe_int(
-                str(
-                    row["Elite"]
-                ).split("/")[0]
-            )
-
-            if count < threshold:
-                continue
-
-            player = next(
-                (
-                    p
-                    for p in players
-                    if p["name"]
-                    == row["Player"]
-                ),
-                None,
-            )
-
-            if not player:
-                continue
-
-            comparison.append(
-                {
-                    "Player": player[
-                        "name"
-                    ],
-                    "Elite": row[
-                        "Elite"
-                    ],
-                    "You Own": (
-                        "✅ Yes"
-                        if player[
-                            "id"
-                        ] in owned
-                        else "❌ No"
-                    ),
-                    "Model": row[
-                        "Model Score"
-                    ],
-                    "FDR": row["FDR"],
-                    "Verdict": (
-                        "🟢 Elite + model target"
-                        if (
-                            player[
-                                "id"
-                            ]
-                            not in owned
-                            and row[
-                                "Model Score"
-                            ] >= 60
-                        )
-                        else (
-                            "🟡 Elite pick — review"
-                            if player[
-                                "id"
-                            ]
-                            not in owned
-                            else "✅ Already owned"
-                        )
-                    ),
-                }
-            )
-
-        if comparison:
-
-            st.dataframe(
-                pd.DataFrame(
-                    comparison
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-
-            st.info(
-                "No strong consensus differences found."
-            )
-
-    # --------------------------------------------------------
-    # INDIVIDUAL SQUADS
-    # --------------------------------------------------------
-
-    st.subheader(
-        "👤 Individual Elite Squads"
-    )
-
-    for row in valid:
-
-        with st.expander(
-            f"{row['name']} — "
-            f"{row.get('entry_name', '')}"
-        ):
-
-            squad_rows = [
-                {
-                    "Player": p[
-                        "name"
-                    ],
-                    "Club": p[
-                        "team"
-                    ],
-                    "Pos": p[
-                        "position"
-                    ],
-                    "Price": (
-                        f"£{p['price']:.1f}m"
-                    ),
-                    "Captain": (
-                        "👑"
-                        if p["name"]
-                        == row.get(
-                            "captain"
-                        )
-                        else ""
-                    ),
-                    "Model": round(
-                        blended_score(
-                            p
-                        ),
-                        1,
-                    ),
-                }
-                for p in row["squad"]
-            ]
-
-            st.dataframe(
-                pd.DataFrame(
-                    squad_rows
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            if row.get(
-                "transfers"
-            ):
-
-                st.write(
-                    "**Current GW transfers:** "
-                    + ", ".join(
-                        f"{t['out']} → {t['in']}"
-                        for t in row[
-                            "transfers"
-                        ]
-                    )
-                )
-
-
-# ============================================================
-# YOUTUBE
+# CREATOR FUNCTIONS
 # ============================================================
 
 def extract_video_id(value):
 
     value = (
-        value
-        or ""
+        value or ""
     ).strip()
 
     if re.fullmatch(
@@ -2548,9 +2160,7 @@ def extract_video_id(value):
     ):
         return value
 
-    parsed = urlparse(
-        value
-    )
+    parsed = urlparse(value)
 
     if parsed.netloc:
 
@@ -2600,8 +2210,7 @@ def fetch_youtube_transcript(
             None,
             (
                 "youtube-transcript-api "
-                "is not installed. "
-                "Add it to requirements.txt."
+                "is not installed."
             ),
         )
 
@@ -2637,27 +2246,20 @@ def fetch_youtube_transcript(
                     snippet,
                     dict,
                 ):
-
                     text = snippet.get(
                         "text",
                         "",
                     )
-
                 else:
-
                     text = getattr(
                         snippet,
                         "text",
-                        str(
-                            snippet
-                        ),
+                        str(snippet),
                     )
 
                 if text:
                     lines.append(
-                        str(
-                            text
-                        ).strip()
+                        str(text).strip()
                     )
 
             result = " ".join(
@@ -2667,10 +2269,7 @@ def fetch_youtube_transcript(
             )
 
             if result:
-                return (
-                    result,
-                    None,
-                )
+                return result, None
 
         if hasattr(
             YouTubeTranscriptApi,
@@ -2697,14 +2296,11 @@ def fetch_youtube_transcript(
             )
 
             if result:
-                return (
-                    result,
-                    None,
-                )
+                return result, None
 
         return (
             None,
-            "No transcript was available for this video.",
+            "No transcript available.",
         )
 
     except Exception as exc:
@@ -2712,32 +2308,16 @@ def fetch_youtube_transcript(
         return (
             None,
             (
-                "YouTube transcript could not be retrieved. "
-                "The video may have captions disabled, "
-                "or YouTube may be blocking transcript access. "
+                "YouTube transcript could not "
+                "be retrieved. "
                 f"Technical detail: {exc}"
             ),
         )
 
 
 # ============================================================
-# GEMINI HELPERS
+# GEMINI
 # ============================================================
-
-def get_secret(
-    name,
-    default=None,
-):
-
-    try:
-        return st.secrets.get(
-            name,
-            default,
-        )
-
-    except Exception:
-        return default
-
 
 def gemini_generate(
     prompt,
@@ -2751,8 +2331,7 @@ def gemini_generate(
     if not api_key:
 
         raise RuntimeError(
-            "GEMINI_API_KEY is missing "
-            "from Streamlit Secrets."
+            "GEMINI_API_KEY is missing."
         )
 
     if (
@@ -2800,8 +2379,7 @@ def gemini_generate(
                 )
 
             errors.append(
-                f"{model_name}: "
-                "empty response"
+                f"{model_name}: empty response"
             )
 
         except Exception as exc:
@@ -2811,19 +2389,15 @@ def gemini_generate(
             )
 
     raise RuntimeError(
-        "Gemini failed on all configured models.\n"
+        "Gemini failed on all models.\n"
         + "\n".join(errors)
     )
 
 
-def creator_context(
-    squad
-):
+def creator_context(squad):
 
     if not squad:
-        return (
-            "No manager squad loaded."
-        )
+        return "No squad loaded."
 
     return "\n".join(
         f"- {p['name']} "
@@ -2832,35 +2406,22 @@ def creator_context(
         f"Form {p['form']:.1f} | "
         f"PPG {p['ppg']:.1f} | "
         f"xGI/90 {p['xgi90']:.2f} | "
-        f"FDR {p['fdr']:.1f}"
+        f"FDR {p['fdr']:.1f} | "
+        f"Team form {p['team_form_score']:.1f}"
         for p in squad
     )
 
 
-def elite_context(
-    elite_rows
-):
-
-    if not elite_rows:
-
-        return (
-            "No elite teams loaded."
-        )
+def elite_context(elite_rows):
 
     valid = [
         r
         for r in elite_rows
-        if r.get(
-            "status"
-        )
-        == "OK"
+        if r.get("status") == "OK"
     ]
 
     if not valid:
-
-        return (
-            "No elite teams connected."
-        )
+        return "No elite teams connected."
 
     lines = []
 
@@ -2874,221 +2435,10 @@ def elite_context(
         lines.append(
             f"{row['name']}: "
             f"{players_text}; "
-            f"Captain="
-            f"{row.get('captain', '—')}"
+            f"Captain={row.get('captain', '—')}"
         )
 
-    return "\n".join(
-        lines
-    )
-
-
-# ============================================================
-# CREATOR AI
-# ============================================================
-
-def render_creator_ai(
-    my_squad,
-    elite_rows,
-):
-
-    st.header(
-        "📺 Creator Intelligence"
-    )
-
-    st.caption(
-        "Paste a YouTube FPL video. "
-        "The app extracts its transcript "
-        "and Gemini stress-tests the creator's "
-        "recommendations against your squad "
-        "and FPL data."
-    )
-
-    st.subheader(
-        "🎙️ Monitored Creator Channels"
-    )
-
-    cols = st.columns(5)
-
-    for i, (
-        name,
-        url,
-    ) in enumerate(
-        CREATOR_CHANNELS.items()
-    ):
-
-        cols[i].markdown(
-            f"**[{name}]({url})**"
-        )
-
-    st.divider()
-
-    video_url = st.text_input(
-        "YouTube Video URL or ID",
-        placeholder=(
-            "https://www.youtube.com/watch?v=XXXXXXXXXXX"
-        ),
-    )
-
-    if st.button(
-        "🧠 Analyse YouTube Video",
-        type="primary",
-        key="creator_analyse",
-    ):
-
-        if not video_url.strip():
-
-            st.warning(
-                "Paste a YouTube video URL or ID."
-            )
-
-            return
-
-        if not get_secret(
-            "GEMINI_API_KEY"
-        ):
-
-            st.error(
-                "GEMINI_API_KEY is missing "
-                "from Streamlit Secrets."
-            )
-
-            return
-
-        with st.spinner(
-            "Getting transcript and analysing..."
-        ):
-
-            transcript, error = (
-                fetch_youtube_transcript(
-                    video_url
-                )
-            )
-
-            if error:
-
-                st.error(error)
-
-                return
-
-            # Limit transcript size.
-            transcript = transcript[
-                :25000
-            ]
-
-            top_players = sorted(
-                players,
-                key=lambda p: p[
-                    "xgi90"
-                ],
-                reverse=True,
-            )[:25]
-
-            player_data = "\n".join(
-                f"- {p['name']} | "
-                f"{p['team']} | "
-                f"{p['position']} | "
-                f"£{p['price']:.1f}m | "
-                f"xGI/90 {p['xgi90']:.2f} | "
-                f"Form {p['form']:.1f} | "
-                f"PPG {p['ppg']:.1f} | "
-                f"FDR {p['fdr']:.1f} | "
-                f"4GW projection "
-                f"{p['projection_4gw']:.1f}"
-                for p in top_players
-            )
-
-            prompt = f"""
-You are the FPL Assistant Manager's
-Creator Intelligence engine.
-
-CURRENT GAMEWEEK
-GW{current_gw} -> GW{next_gw}
-
-MANAGER'S SQUAD
-{creator_context(my_squad)}
-
-CONNECTED ELITE MANAGERS
-{elite_context(elite_rows)}
-
-TOP CURRENT FPL DATA
-{player_data}
-
-YOUTUBE TRANSCRIPT
-{transcript}
-
-Do all of the following:
-
-1. Identify the creator and summarise
-   their main recommendations.
-
-2. Extract named players they recommend
-   buying, selling, holding or captaining.
-
-3. Compare important recommendations
-   against the supplied FPL data.
-
-4. Compare them against elite-manager
-   consensus when elite data is available.
-
-5. Identify:
-   - CREATOR + ELITE AGREEMENT
-   - CREATOR ONLY
-   - ELITE ONLY
-   - DATA FAVOURS CREATOR
-   - DATA FAVOURS ELITE
-
-6. Give a manager-specific recommendation
-   for the user's actual squad.
-
-7. Highlight any recommendation that would
-   require a transfer, captain change,
-   or transfer hit.
-
-8. Do not invent statistics,
-   injuries or quotes.
-
-9. Clearly distinguish what the creator said
-   from what the model concludes.
-
-Use a concise table where useful,
-then give a final verdict.
-"""
-
-            try:
-
-                result, model = (
-                    gemini_generate(
-                        prompt,
-                        (
-                            "You are an elite, "
-                            "objective FPL analyst. "
-                            "Never invent data. "
-                            "Treat YouTube opinions "
-                            "as opinions and "
-                            "stress-test them "
-                            "against supplied data."
-                        ),
-                    )
-                )
-
-                st.success(
-                    f"Analysis completed with {model}."
-                )
-
-                st.markdown(
-                    result
-                )
-
-            except Exception as exc:
-
-                st.error(
-                    "Creator analysis failed."
-                )
-
-                st.code(
-                    str(exc)
-                )
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -3113,17 +2463,13 @@ def strategy_briefing(
     blanks = [
         p
         for p in squad
-        if p[
-            "next_gw_fixtures"
-        ] == 0
+        if p["next_gw_fixtures"] == 0
     ]
 
     doubles = [
         p
         for p in squad
-        if p[
-            "next_gw_fixtures"
-        ] >= 2
+        if p["next_gw_fixtures"] >= 2
     ]
 
     captains = captain_recommendations(
@@ -3146,25 +2492,36 @@ def strategy_briefing(
         else 3
     )
 
+    avg_team_form = (
+        sum(
+            p["team_form_score"]
+            for p in squad
+        )
+        / len(squad)
+        if squad
+        else 5
+    )
+
     if len(blanks) >= 4:
 
         chip = (
             "⚠️ 4+ players blank next GW. "
-            "Review Free Hit / restructuring options."
+            "Review Free Hit / restructuring."
         )
 
     elif len(doubles) >= 4:
 
         chip = (
-            "⚡ 4+ players have multiple fixtures. "
-            "Potential Bench Boost / Triple Captain window."
+            "⚡ 4+ players have multiple "
+            "fixtures. Potential Bench "
+            "Boost / Triple Captain window."
         )
 
     else:
 
         chip = (
             "Hold chips unless a stronger "
-            "fixture/blank window appears."
+            "fixture or blank window appears."
         )
 
     return {
@@ -3174,12 +2531,13 @@ def strategy_briefing(
         "captains": captains,
         "transfer": transfer,
         "avg_fdr": avg_fdr,
+        "avg_team_form": avg_team_form,
         "chip": chip,
     }
 
 
 # ============================================================
-# TITLE
+# UI
 # ============================================================
 
 st.title(
@@ -3188,8 +2546,7 @@ st.title(
 
 st.caption(
     f"GW{current_gw} → GW{next_gw} | "
-    "Official FPL API + underlying metrics + "
-    "decision engine"
+    "FPL data + team form + decision engine"
 )
 
 
@@ -3227,17 +2584,17 @@ with st.sidebar:
     st.divider()
 
     st.caption(
-        "FPL data is cached briefly for speed."
+        "FPL data is cached for speed."
     )
 
     st.caption(
-        "Elite manager data is loaded "
-        "only when requested."
+        "Elite managers only load when "
+        "you open that section."
     )
 
 
 # ============================================================
-# LOAD USER TEAM
+# LOAD USER SQUAD
 # ============================================================
 
 team_data = None
@@ -3247,23 +2604,11 @@ if entry_id_input.strip():
 
     try:
 
-        team_id = safe_int(
-            entry_id_input.strip()
+        team_data, my_squad = load_my_team(
+            safe_int(
+                entry_id_input.strip()
+            )
         )
-
-        if team_id <= 0:
-
-            st.sidebar.error(
-                "Please enter a valid FPL Team ID."
-            )
-
-        else:
-
-            team_data, my_squad = (
-                load_my_team(
-                    team_id
-                )
-            )
 
     except Exception as exc:
 
@@ -3313,7 +2658,8 @@ with tabs[0]:
     if not my_squad:
 
         st.info(
-            "Enter your FPL Team ID in the sidebar."
+            "Enter your FPL Team ID "
+            "in the sidebar."
         )
 
     else:
@@ -3325,10 +2671,9 @@ with tabs[0]:
 
         bank = (
             num(
-                history.get(
-                    "bank"
-                )
-            ) / 10
+                history.get("bank")
+            )
+            / 10
         )
 
         brief = strategy_briefing(
@@ -3337,24 +2682,20 @@ with tabs[0]:
             free_transfers,
         )
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
 
         c1.metric(
             "Transfer",
-            brief[
-                "transfer"
-            ]["decision"],
+            brief["transfer"][
+                "decision"
+            ],
         )
 
         c2.metric(
             "Captain",
             (
-                brief[
-                    "captains"
-                ][0]["name"]
-                if brief[
-                    "captains"
-                ]
+                brief["captains"][0]["name"]
+                if brief["captains"]
                 else "—"
             ),
         )
@@ -3362,6 +2703,11 @@ with tabs[0]:
         c3.metric(
             "Avg FDR",
             f"{brief['avg_fdr']:.2f}",
+        )
+
+        c4.metric(
+            "Team Form",
+            f"{brief['avg_team_form']:.1f}/10",
         )
 
         st.write(
@@ -3413,6 +2759,62 @@ with tabs[0]:
             brief["chip"]
         )
 
+        st.subheader(
+            "📈 Team Form"
+        )
+
+        form_rows = []
+
+        seen = set()
+
+        for p in my_squad:
+
+            if p["team_id"] in seen:
+                continue
+
+            seen.add(
+                p["team_id"]
+            )
+
+            form_rows.append(
+                {
+                    "Club": p["team"],
+                    "Recent": " ".join(
+                        p[
+                            "team_form_results"
+                        ]
+                    ),
+                    "Form": round(
+                        p[
+                            "team_form_score"
+                        ],
+                        1,
+                    ),
+                    "Goals": p[
+                        "team_goals_for"
+                    ],
+                    "Conceded": p[
+                        "team_goals_against"
+                    ],
+                    "Clean Sheets": p[
+                        "team_clean_sheets"
+                    ],
+                    "Verdict": team_form_label(
+                        p[
+                            "team_form_score"
+                        ]
+                    ),
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(
+                form_rows
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
 
 # ============================================================
 # MY TEAM
@@ -3439,23 +2841,19 @@ with tabs[1]:
 
         bank = (
             num(
-                history.get(
-                    "bank"
-                )
-            ) / 10
+                history.get("bank")
+            )
+            / 10
         )
 
         value = (
             num(
-                history.get(
-                    "value"
-                )
-            ) / 10
+                history.get("value")
+            )
+            / 10
         )
 
-        c1, c2, c3, c4 = (
-            st.columns(4)
-        )
+        c1, c2, c3, c4 = st.columns(4)
 
         c1.metric(
             "GW Points",
@@ -3490,29 +2888,29 @@ with tabs[1]:
                 "Pos": p["position"],
                 "Role": (
                     "👑 Captain"
-                    if p[
-                        "is_captain"
-                    ]
+                    if p["is_captain"]
                     else (
                         "VC"
-                        if p[
-                            "is_vice"
-                        ]
+                        if p["is_vice"]
                         else ""
                     )
                 ),
                 "Price": (
                     f"£{p['price']:.1f}m"
                 ),
-                "Points": p[
-                    "points"
-                ],
+                "Points": p["points"],
                 "PPG": round(
                     p["ppg"],
                     1,
                 ),
                 "Form": round(
                     p["form"],
+                    1,
+                ),
+                "Team Form": round(
+                    p[
+                        "team_form_score"
+                    ],
                     1,
                 ),
                 "xGI/90": round(
@@ -3562,18 +2960,15 @@ with tabs[2]:
 
         bank = (
             num(
-                history.get(
-                    "bank"
-                )
-            ) / 10
+                history.get("bank")
+            )
+            / 10
         )
 
-        evaluation = (
-            transfer_decision(
-                my_squad,
-                bank,
-                free_transfers,
-            )
+        evaluation = transfer_decision(
+            my_squad,
+            bank,
+            free_transfers,
         )
 
         st.info(
@@ -3601,19 +2996,15 @@ with tabs[2]:
             ]
 
             if diff > 0:
-
                 money = (
                     f"+£{diff:.1f}m"
                 )
-
             elif diff < 0:
-
                 money = (
-                    f"frees £{abs(diff):.1f}m"
+                    f"frees "
+                    f"£{abs(diff):.1f}m"
                 )
-
             else:
-
                 money = "same price"
 
             st.markdown(
@@ -3623,9 +3014,7 @@ with tabs[2]:
                 f"({money})"
             )
 
-            c1, c2, c3 = (
-                st.columns(3)
-            )
+            c1, c2, c3, c4 = st.columns(4)
 
             c1.metric(
                 "Out xGI/90",
@@ -3638,6 +3027,11 @@ with tabs[2]:
             )
 
             c3.metric(
+                "Team Form",
+                f"{in_p['team_form_score']:.1f}",
+            )
+
+            c4.metric(
                 "Net Projection",
                 f"{suggestion['net_gain']:+.1f}",
             )
@@ -3679,6 +3073,12 @@ with tabs[3]:
                 "Points": p["points"],
                 "Form": round(
                     p["form"],
+                    1,
+                ),
+                "Team Form": round(
+                    p[
+                        "team_form_score"
+                    ],
                     1,
                 ),
                 "xGI/90": round(
@@ -3738,14 +3138,12 @@ with tabs[4]:
                 else None
             )
 
-            c1, c2 = (
-                st.columns(2)
-            )
+            c1, c2 = st.columns(2)
 
             with c1:
 
                 st.success(
-                    f"👑 CAPTAIN: "
+                    "👑 CAPTAIN: "
                     f"**{captain['name']}**"
                 )
 
@@ -3755,8 +3153,8 @@ with tabs[4]:
                     f"{captain['xgi90']:.2f} | "
                     f"Form "
                     f"{captain['form']:.1f} | "
-                    f"PPG "
-                    f"{captain['ppg']:.1f}"
+                    f"Team form "
+                    f"{captain['team_form_score']:.1f}"
                 )
 
                 st.write(
@@ -3769,7 +3167,7 @@ with tabs[4]:
                 if vice:
 
                     st.info(
-                        f"🥈 VICE: "
+                        "🥈 VICE: "
                         f"**{vice['name']}**"
                     )
 
@@ -3788,34 +3186,28 @@ with tabs[4]:
             rows = [
                 {
                     "Rank": i,
-                    "Player": p[
-                        "name"
-                    ],
-                    "Club": p[
-                        "team"
-                    ],
+                    "Player": p["name"],
+                    "Club": p["team"],
                     "xGI/90": round(
-                        p[
-                            "xgi90"
-                        ],
+                        p["xgi90"],
                         2,
                     ),
                     "Form": round(
+                        p["form"],
+                        1,
+                    ),
+                    "Team Form": round(
                         p[
-                            "form"
+                            "team_form_score"
                         ],
                         1,
                     ),
                     "PPG": round(
-                        p[
-                            "ppg"
-                        ],
+                        p["ppg"],
                         1,
                     ),
                     "FDR": round(
-                        p[
-                            "fdr"
-                        ],
+                        p["fdr"],
                         1,
                     ),
                 }
@@ -3851,6 +3243,7 @@ with tabs[5]:
             "Form",
             "PPG",
             "4-GW Projection",
+            "Team Form",
         ],
         horizontal=True,
     )
@@ -3879,44 +3272,49 @@ with tabs[5]:
     if sort_by == "Model Score":
 
         pool.sort(
-            key=lambda p: p[
-                "blended"
-            ],
+            key=lambda p:
+            p["blended"],
             reverse=True,
         )
 
     elif sort_by == "xGI/90":
 
         pool.sort(
-            key=lambda p: p[
-                "xgi90"
-            ],
+            key=lambda p:
+            p["xgi90"],
             reverse=True,
         )
 
     elif sort_by == "FPL Points":
 
         pool.sort(
-            key=lambda p: p[
-                "points"
-            ],
+            key=lambda p:
+            p["points"],
             reverse=True,
         )
 
     elif sort_by == "Form":
 
         pool.sort(
-            key=lambda p: p[
-                "form"
-            ],
+            key=lambda p:
+            p["form"],
             reverse=True,
         )
 
     elif sort_by == "PPG":
 
         pool.sort(
-            key=lambda p: p[
-                "ppg"
+            key=lambda p:
+            p["ppg"],
+            reverse=True,
+        )
+
+    elif sort_by == "Team Form":
+
+        pool.sort(
+            key=lambda p:
+            p[
+                "team_form_score"
             ],
             reverse=True,
         )
@@ -3924,7 +3322,8 @@ with tabs[5]:
     else:
 
         pool.sort(
-            key=lambda p: p[
+            key=lambda p:
+            p[
                 "projection_4gw"
             ],
             reverse=True,
@@ -3932,43 +3331,33 @@ with tabs[5]:
 
     rows = [
         {
-            "Player": p[
-                "name"
-            ],
-            "Club": p[
-                "team"
-            ],
-            "Pos": p[
-                "position"
-            ],
+            "Player": p["name"],
+            "Club": p["team"],
+            "Pos": p["position"],
             "Price": (
                 f"£{p['price']:.1f}m"
             ),
-            "Points": p[
-                "points"
-            ],
+            "Points": p["points"],
             "xGI/90": round(
-                p[
-                    "xgi90"
-                ],
+                p["xgi90"],
                 2,
             ),
             "Form": round(
+                p["form"],
+                1,
+            ),
+            "Team Form": round(
                 p[
-                    "form"
+                    "team_form_score"
                 ],
                 1,
             ),
             "PPG": round(
-                p[
-                    "ppg"
-                ],
+                p["ppg"],
                 1,
             ),
             "FDR": round(
-                p[
-                    "fdr"
-                ],
+                p["fdr"],
                 1,
             ),
             "4GW Projection": round(
@@ -3978,9 +3367,7 @@ with tabs[5]:
                 1,
             ),
             "Model": round(
-                p[
-                    "blended"
-                ],
+                p["blended"],
                 1,
             ),
         }
@@ -4001,7 +3388,7 @@ with tabs[5]:
 with tabs[6]:
 
     st.header(
-        "📅 Fixtures"
+        "📅 Fixtures & Team Form"
     )
 
     if my_squad:
@@ -4012,19 +3399,17 @@ with tabs[6]:
 
         rows = [
             {
-                "Player": p[
-                    "name"
-                ],
-                "Club": p[
-                    "team"
-                ],
-                "Pos": p[
-                    "position"
-                ],
-                "Avg FDR": round(
+                "Player": p["name"],
+                "Club": p["team"],
+                "Pos": p["position"],
+                "Team Form": round(
                     p[
-                        "fdr"
+                        "team_form_score"
                     ],
+                    1,
+                ),
+                "Avg FDR": round(
+                    p["fdr"],
                     2,
                 ),
                 "Upcoming": p[
@@ -4035,14 +3420,65 @@ with tabs[6]:
         ]
 
         st.dataframe(
-            pd.DataFrame(
-                rows
-            ).sort_values(
+            pd.DataFrame(rows).sort_values(
                 "Avg FDR"
             ),
             use_container_width=True,
             hide_index=True,
         )
+
+    st.subheader(
+        "Team Form Across the League"
+    )
+
+    team_rows = []
+
+    for team_id, data in team_form.items():
+
+        team_rows.append(
+            {
+                "Club": team_names.get(
+                    team_id,
+                    "?",
+                ),
+                "Recent": " ".join(
+                    data.get(
+                        "recent_results",
+                        [],
+                    )
+                ),
+                "Form": round(
+                    data.get(
+                        "form_score",
+                        5,
+                    ),
+                    1,
+                ),
+                "Goals For": data.get(
+                    "goals_for",
+                    0,
+                ),
+                "Goals Against": data.get(
+                    "goals_against",
+                    0,
+                ),
+                "Clean Sheets": data.get(
+                    "clean_sheets",
+                    0,
+                ),
+            }
+        )
+
+    st.dataframe(
+        pd.DataFrame(
+            team_rows
+        ).sort_values(
+            "Form",
+            ascending=False,
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
 
     st.subheader(
         "Fixture Swings"
@@ -4100,9 +3536,7 @@ with tabs[6]:
         reverse=True,
     )
 
-    c1, c2 = (
-        st.columns(2)
-    )
+    c1, c2 = st.columns(2)
 
     with c1:
 
@@ -4110,11 +3544,7 @@ with tabs[6]:
             "### 🟢 Getting Easier"
         )
 
-        for (
-            name,
-            near,
-            later,
-        ) in improving:
+        for name, near, later in improving:
 
             st.write(
                 f"**{name}** — "
@@ -4128,11 +3558,7 @@ with tabs[6]:
             "### 🔴 Getting Tougher"
         )
 
-        for (
-            name,
-            near,
-            later,
-        ) in worsening:
+        for name, near, later in worsening:
 
             st.write(
                 f"**{name}** — "
@@ -4166,10 +3592,9 @@ with tabs[7]:
 
         bank = (
             num(
-                history.get(
-                    "bank"
-                )
-            ) / 10
+                history.get("bank")
+            )
+            / 10
         )
 
         brief = strategy_briefing(
@@ -4192,7 +3617,7 @@ with tabs[7]:
 
             st.subheader(
                 f"🪑 Current GW{current_gw} "
-                f"Bench Check"
+                "Bench Check"
             )
 
             st.dataframe(
@@ -4220,7 +3645,8 @@ with tabs[8]:
     if not league_id_input.strip():
 
         st.info(
-            "Enter your Mini-League ID in the sidebar."
+            "Enter your Mini-League ID "
+            "in the sidebar."
         )
 
     else:
@@ -4237,8 +3663,7 @@ with tabs[8]:
                 league.get(
                     "standings",
                     {},
-                )
-                .get(
+                ).get(
                     "results",
                     [],
                 )
@@ -4293,9 +3718,8 @@ with tabs[9]:
     )
 
     st.caption(
-        "IMPORTANT: this feature can ONLY "
-        "select from your currently loaded "
-        "15-man squad."
+        "This can ONLY select players "
+        "from your current 15-man squad."
     )
 
     if not my_squad:
@@ -4321,25 +3745,21 @@ with tabs[9]:
 
             rows = [
                 {
-                    "Player": p[
-                        "name"
-                    ],
-                    "Club": p[
-                        "team"
-                    ],
-                    "Pos": p[
-                        "position"
-                    ],
-                    "xGI/90": round(
+                    "Player": p["name"],
+                    "Club": p["team"],
+                    "Pos": p["position"],
+                    "Team Form": round(
                         p[
-                            "xgi90"
+                            "team_form_score"
                         ],
+                        1,
+                    ),
+                    "xGI/90": round(
+                        p["xgi90"],
                         2,
                     ),
                     "Model": round(
-                        p[
-                            "blended"
-                        ],
+                        p["blended"],
                         1,
                     ),
                 }
@@ -4360,19 +3780,11 @@ with tabs[9]:
 
             bench_rows = [
                 {
-                    "Player": p[
-                        "name"
-                    ],
-                    "Club": p[
-                        "team"
-                    ],
-                    "Pos": p[
-                        "position"
-                    ],
+                    "Player": p["name"],
+                    "Club": p["team"],
+                    "Pos": p["position"],
                     "Model": round(
-                        p[
-                            "blended"
-                        ],
+                        p["blended"],
                         1,
                     ),
                 }
@@ -4392,8 +3804,8 @@ with tabs[9]:
         else:
 
             st.error(
-                "No valid formation could "
-                "be created from your squad."
+                "No valid formation "
+                "could be created."
             )
 
 
@@ -4403,9 +3815,418 @@ with tabs[9]:
 
 with tabs[10]:
 
-    render_elite_tracker(
-        my_squad
+    st.header(
+        "🏆 Elite Manager Tracker"
     )
+
+    st.caption(
+        "Elite manager data is loaded only "
+        "when this tab is opened."
+    )
+
+    st.info(
+        "The app will never guess a Team ID. "
+        "Unknown managers remain unverified."
+    )
+
+    # IMPORTANT:
+    # This is intentionally inside the tab.
+    # It prevents these requests happening
+    # every time the application starts.
+
+    with st.spinner(
+        "Checking elite managers..."
+    ):
+
+        elite_rows = [
+            load_elite_manager(
+                name,
+                meta["entry_id"],
+            )
+            for name, meta
+            in ELITE_MANAGERS.items()
+        ]
+
+    verification_rows = []
+
+    for name, meta in ELITE_MANAGERS.items():
+
+        entry_id = meta["entry_id"]
+
+        if entry_id:
+
+            info, result = verify_team_id(
+                entry_id
+            )
+
+            verification_rows.append(
+                {
+                    "Manager": name,
+                    "HOF Rank": meta[
+                        "hall_of_fame"
+                    ],
+                    "Team ID": entry_id,
+                    "Verification": (
+                        "✅ VERIFIED"
+                        if info
+                        else "❌ FAILED"
+                    ),
+                    "FPL Team": (
+                        info.get(
+                            "name",
+                            "—",
+                        )
+                        if info
+                        else "—"
+                    ),
+                }
+            )
+
+        else:
+
+            verification_rows.append(
+                {
+                    "Manager": name,
+                    "HOF Rank": meta[
+                        "hall_of_fame"
+                    ],
+                    "Team ID": "Not known",
+                    "Verification": (
+                        "🟠 NOT VERIFIED"
+                    ),
+                    "FPL Team": "—",
+                }
+            )
+
+    st.dataframe(
+        pd.DataFrame(
+            verification_rows
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    overview = []
+
+    for row in elite_rows:
+
+        overview.append(
+            {
+                "Manager": row["name"],
+                "HOF": ELITE_MANAGERS[
+                    row["name"]
+                ][
+                    "hall_of_fame"
+                ],
+                "Status": (
+                    "🟢 Connected"
+                    if row.get(
+                        "status"
+                    ) == "OK"
+                    else (
+                        "🟠 ID not verified"
+                        if row.get(
+                            "status"
+                        )
+                        == "UNVERIFIED"
+                        else "🔴 Failed"
+                    )
+                ),
+                "GW Points": row.get(
+                    "gw_points",
+                    "—",
+                ),
+                "Overall Rank": row.get(
+                    "overall_rank",
+                    "—",
+                ),
+                "Captain": row.get(
+                    "captain",
+                    "—",
+                ),
+                "Transfers": len(
+                    row.get(
+                        "transfers",
+                        [],
+                    )
+                ),
+            }
+        )
+
+    st.dataframe(
+        pd.DataFrame(
+            overview
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    consensus, captains, transfers, valid = (
+        elite_consensus(
+            elite_rows
+        )
+    )
+
+    if not valid:
+
+        st.warning(
+            "No elite teams are currently connected."
+        )
+
+    else:
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Managers Connected",
+            f"{len(valid)}/5",
+        )
+
+        c2.metric(
+            "Captain Leader",
+            (
+                captains[0]["Captain"]
+                if captains
+                else "—"
+            ),
+        )
+
+        c3.metric(
+            "Captain Consensus",
+            (
+                captains[0]["Managers"]
+                if captains
+                else "—"
+            ),
+        )
+
+        st.subheader(
+            "🔥 Most-Owned Elite Players"
+        )
+
+        if consensus:
+
+            st.dataframe(
+                pd.DataFrame(
+                    consensus[:30]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        left, right = st.columns(2)
+
+        with left:
+
+            st.subheader(
+                "🧢 Captain Consensus"
+            )
+
+            if captains:
+
+                st.dataframe(
+                    pd.DataFrame(
+                        captains
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            else:
+
+                st.info(
+                    "No captain data."
+                )
+
+        with right:
+
+            st.subheader(
+                "🔄 Elite Transfers"
+            )
+
+            if transfers:
+
+                st.dataframe(
+                    pd.DataFrame(
+                        transfers
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            else:
+
+                st.info(
+                    "No current-GW "
+                    "transfers recorded."
+                )
+
+        st.divider()
+
+        st.subheader(
+            "🆚 Elite Managers vs Your Team"
+        )
+
+        if not my_squad:
+
+            st.info(
+                "Load your team in the sidebar."
+            )
+
+        else:
+
+            owned = {
+                p["id"]
+                for p in my_squad
+            }
+
+            threshold = max(
+                2,
+                (
+                    len(valid)
+                    + 1
+                )
+                // 2,
+            )
+
+            comparison = []
+
+            for row in consensus:
+
+                count = safe_int(
+                    str(
+                        row["Elite"]
+                    ).split(
+                        "/"
+                    )[0]
+                )
+
+                if count < threshold:
+                    continue
+
+                player = player_by_id.get(
+                    next(
+                        (
+                            pid
+                            for pid, p
+                            in player_by_id.items()
+                            if p["name"]
+                            == row["Player"]
+                        ),
+                        None,
+                    )
+                )
+
+                if not player:
+                    continue
+
+                comparison.append(
+                    {
+                        "Player": player[
+                            "name"
+                        ],
+                        "Elite": row[
+                            "Elite"
+                        ],
+                        "You Own": (
+                            "✅ Yes"
+                            if player[
+                                "id"
+                            ]
+                            in owned
+                            else "❌ No"
+                        ),
+                        "Model": row[
+                            "Model Score"
+                        ],
+                        "Team Form": round(
+                            player[
+                                "team_form_score"
+                            ],
+                            1,
+                        ),
+                        "FDR": row[
+                            "FDR"
+                        ],
+                    }
+                )
+
+            if comparison:
+
+                st.dataframe(
+                    pd.DataFrame(
+                        comparison
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            else:
+
+                st.info(
+                    "No major consensus differences."
+                )
+
+        st.subheader(
+            "👤 Individual Elite Squads"
+        )
+
+        for row in valid:
+
+            with st.expander(
+                f"{row['name']} — "
+                f"{row.get('entry_name', '')}"
+            ):
+
+                squad_rows = [
+                    {
+                        "Player": p["name"],
+                        "Club": p["team"],
+                        "Pos": p["position"],
+                        "Price": (
+                            f"£{p['price']:.1f}m"
+                        ),
+                        "Captain": (
+                            "👑"
+                            if p["name"]
+                            == row.get(
+                                "captain"
+                            )
+                            else ""
+                        ),
+                        "Model": round(
+                            blended_score(p),
+                            1,
+                        ),
+                    }
+                    for p in row[
+                        "squad"
+                    ]
+                ]
+
+                st.dataframe(
+                    pd.DataFrame(
+                        squad_rows
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                if row.get(
+                    "transfers"
+                ):
+
+                    st.write(
+                        "**Current GW "
+                        "transfers:** "
+                        + ", ".join(
+                            f"{t['out']} "
+                            f"→ {t['in']}"
+                            for t in row[
+                                "transfers"
+                            ]
+                        )
+                    )
 
 
 # ============================================================
@@ -4414,10 +4235,199 @@ with tabs[10]:
 
 with tabs[11]:
 
-    render_creator_ai(
-        my_squad,
-        st.session_state.elite_rows,
+    st.header(
+        "📺 Creator Intelligence"
     )
+
+    st.caption(
+        "Analyse a YouTube FPL video against "
+        "your squad and the available data."
+    )
+
+    # Elite data is loaded ONLY here if needed.
+    elite_rows_for_creator = []
+
+    st.subheader(
+        "🎙️ Monitored Creator Channels"
+    )
+
+    cols = st.columns(5)
+
+    for i, (
+        name,
+        url,
+    ) in enumerate(
+        CREATOR_CHANNELS.items()
+    ):
+
+        cols[i].markdown(
+            f"**[{name}]({url})**"
+        )
+
+    st.divider()
+
+    video_url = st.text_input(
+        "YouTube Video URL or ID",
+        placeholder=(
+            "https://www.youtube.com/watch?v=XXXXXXXXXXX"
+        ),
+        key="creator_video_url",
+    )
+
+    if st.button(
+        "🧠 Analyse YouTube Video",
+        type="primary",
+        key="creator_analyse",
+    ):
+
+        if not video_url.strip():
+
+            st.warning(
+                "Paste a YouTube video URL."
+            )
+
+        elif not get_secret(
+            "GEMINI_API_KEY"
+        ):
+
+            st.error(
+                "GEMINI_API_KEY is missing."
+            )
+
+        else:
+
+            with st.spinner(
+                "Getting transcript..."
+            ):
+
+                transcript, error = (
+                    fetch_youtube_transcript(
+                        video_url
+                    )
+                )
+
+            if error:
+
+                st.error(error)
+
+            else:
+
+                # Load elite data only when
+                # Creator AI is actually used.
+                with st.spinner(
+                    "Checking elite consensus..."
+                ):
+
+                    elite_rows_for_creator = [
+                        load_elite_manager(
+                            name,
+                            meta["entry_id"],
+                        )
+                        for name, meta
+                        in ELITE_MANAGERS.items()
+                    ]
+
+                transcript = transcript[
+                    :25000
+                ]
+
+                top_players = sorted(
+                    players,
+                    key=lambda p:
+                    p["xgi90"],
+                    reverse=True,
+                )[:25]
+
+                player_data = "\n".join(
+                    f"- {p['name']} | "
+                    f"{p['team']} | "
+                    f"{p['position']} | "
+                    f"£{p['price']:.1f}m | "
+                    f"xGI/90 "
+                    f"{p['xgi90']:.2f} | "
+                    f"Form "
+                    f"{p['form']:.1f} | "
+                    f"Team form "
+                    f"{p['team_form_score']:.1f} | "
+                    f"PPG "
+                    f"{p['ppg']:.1f} | "
+                    f"FDR "
+                    f"{p['fdr']:.1f} | "
+                    f"4GW "
+                    f"{p['projection_4gw']:.1f}"
+                    for p in top_players
+                )
+
+                prompt = f"""
+You are the FPL Assistant Manager's
+Creator Intelligence engine.
+
+CURRENT GAMEWEEK
+GW{current_gw} -> GW{next_gw}
+
+MANAGER'S SQUAD
+{creator_context(my_squad)}
+
+CONNECTED ELITE MANAGERS
+{elite_context(elite_rows_for_creator)}
+
+TOP CURRENT FPL DATA
+{player_data}
+
+YOUTUBE TRANSCRIPT
+{transcript}
+
+Do the following:
+
+1. Identify the creator if possible.
+2. Summarise their main recommendations.
+3. Extract players they recommend buying,
+   selling, holding or captaining.
+4. Compare recommendations against
+   the supplied FPL data.
+5. Compare them against elite consensus.
+6. Consider team recent form.
+7. Identify agreements and disagreements.
+8. Give advice specifically for the user's
+   actual squad.
+9. Do not invent statistics.
+10. Clearly distinguish what the creator said
+    from what the model concludes.
+
+Be concise and practical.
+"""
+
+                try:
+
+                    result, model = (
+                        gemini_generate(
+                            prompt,
+                            (
+                                "You are an elite "
+                                "objective FPL analyst. "
+                                "Never invent data."
+                            ),
+                        )
+                    )
+
+                    st.success(
+                        f"Analysis completed "
+                        f"with {model}."
+                    )
+
+                    st.markdown(
+                        result
+                    )
+
+                except Exception as exc:
+
+                    st.error(
+                        "Creator analysis failed."
+                    )
+
+                    st.code(
+                        str(exc)
+                    )
 
 
 # ============================================================
@@ -4471,6 +4481,10 @@ with tabs[12]:
                 "🔓 Assistant unlocked."
             )
 
+            if "messages" not in st.session_state:
+
+                st.session_state.messages = []
+
             for message in (
                 st.session_state.messages
             ):
@@ -4480,13 +4494,12 @@ with tabs[12]:
                 ):
 
                     st.markdown(
-                        message[
-                            "content"
-                        ]
+                        message["content"]
                     )
 
             prompt = st.chat_input(
-                "Ask about transfers, captaincy, fixtures..."
+                "Ask about transfers, "
+                "captaincy, fixtures..."
             )
 
             if prompt:
@@ -4509,7 +4522,7 @@ with tabs[12]:
                 history = (
                     team_data.get(
                         "entry_history",
-                        {}
+                        {},
                     )
                     if team_data
                     else {}
@@ -4520,7 +4533,8 @@ with tabs[12]:
                         history.get(
                             "bank"
                         )
-                    ) / 10
+                    )
+                    / 10
                     if history
                     else 0
                 )
@@ -4563,14 +4577,16 @@ USER QUESTION
 Give practical FPL advice.
 
 Rules:
-- Prioritise the manager's actual squad.
+- Prioritise the actual squad.
 - Use supplied data.
-- Consider fixtures, form,
-  xGI/90, xGC/90, availability
-  and projected output.
+- Consider fixtures.
+- Consider player form.
+- Consider team form.
+- Consider xGI/90.
+- Consider availability.
+- Consider projected output.
 - Do not invent statistics.
-- Be decisive when the evidence
-  supports it.
+- Be decisive when evidence supports it.
 """
 
                 with st.chat_message(
@@ -4587,12 +4603,12 @@ Rules:
                                 gemini_generate(
                                     assistant_prompt,
                                     (
-                                        "You are an elite "
-                                        "FPL strategist. "
+                                        "You are an "
+                                        "elite FPL "
+                                        "strategist. "
                                         "Be practical, "
                                         "data-led and "
-                                        "honest about "
-                                        "uncertainty."
+                                        "honest."
                                     ),
                                 )
                             )
@@ -4631,7 +4647,7 @@ st.divider()
 
 st.caption(
     "⚽ FPL Assistant Manager — "
-    "Official FPL API + underlying metrics + "
-    "Elite Manager consensus + "
-    "YouTube Creator Intelligence."
+    "Official FPL data + team form + "
+    "fixture analysis + elite manager "
+    "consensus + Creator Intelligence."
 )
