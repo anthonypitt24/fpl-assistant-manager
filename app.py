@@ -83,6 +83,14 @@ CREATOR_CHANNELS = {
     "Planet FPL (James & Suj)": "https://www.youtube.com/@PlanetFPL",
 }
 
+ELITE_MANAGERS = {
+    "Abinav C": {"entry_id": 175376, "hall_of_fame": 3},
+    "John Walsh": {"entry_id": 1519295, "hall_of_fame": 5},
+    "FPL Harry": {"entry_id": 1320, "hall_of_fame": 10},
+    "Keilan Kenny": {"entry_id": None, "hall_of_fame": 38},
+    "Nick (FPL Spartan)": {"entry_id": None, "hall_of_fame": 63},
+}
+
 
 # ============================================================
 # API HELPERS
@@ -102,6 +110,11 @@ def get_entry_info(entry_id):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_entry_picks(entry_id, gameweek):
     return api_get(f"{API}/entry/{entry_id}/event/{gameweek}/picks/")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_entry_transfers(entry_id):
+    return api_get(f"{API}/entry/{entry_id}/transfers/")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1085,6 +1098,122 @@ def gemini_generate(prompt, system_instruction):
 
 
 # ============================================================
+# ELITE MANAGERS — FULL TRACKER ENABLED
+# ============================================================
+# ============================================================
+# ELITE MANAGER TRACKER
+# ============================================================
+def load_elite_manager(name, entry_id):
+    entry_id = safe_int(entry_id, 0)
+    if not entry_id:
+        return {"name": name, "status": "MISSING", "error": "Team ID not configured."}
+    try:
+        info = get_entry_info(entry_id)
+        picks_data = get_entry_picks(entry_id, current_gw)
+        picks = picks_data.get("picks", [])
+        if not picks and next_gw != current_gw:
+            picks_data = get_entry_picks(entry_id, next_gw)
+            picks = picks_data.get("picks", [])
+        squad, captain, vice = [], None, None
+        for pick in picks:
+            player = player_by_id.get(pick.get("element"))
+            if not player:
+                continue
+            squad.append(player.copy())
+            if pick.get("is_captain"): captain = player["name"]
+            if pick.get("is_vice_captain"): vice = player["name"]
+        transfers = []
+        try:
+            for tr in get_entry_transfers(entry_id):
+                if tr.get("event") == current_gw:
+                    out_p = player_by_id.get(tr.get("element_out"))
+                    in_p = player_by_id.get(tr.get("element_in"))
+                    transfers.append({
+                        "out": out_p["name"] if out_p else str(tr.get("element_out")),
+                        "in": in_p["name"] if in_p else str(tr.get("element_in")),
+                        "cost": tr.get("event_cost", 0),
+                    })
+        except Exception:
+            pass
+        history = get_team_history(entry_id)
+        latest = (history.get("current") or [{}])[-1]
+        return {
+            "name": name, "entry_id": entry_id, "status": "OK",
+            "entry_name": info.get("name", ""),
+            "manager_name": f"{info.get('player_first_name', '')} {info.get('player_last_name', '')}".strip(),
+            "overall_rank": info.get("summary_overall_rank", "—"),
+            "total_points": info.get("summary_overall_points", "—"),
+            "gw_points": latest.get("points", "—"),
+            "squad": squad, "captain": captain, "vice": vice, "transfers": transfers,
+        }
+    except Exception as exc:
+        return {"name": name, "entry_id": entry_id, "status": "ERROR", "error": str(exc), "squad": [], "transfers": []}
+
+
+def elite_consensus(elite_rows):
+    valid = [r for r in elite_rows if r.get("status") == "OK" and r.get("squad")]
+    total = len(valid)
+    if not total: return [], [], [], valid
+    counts, caps, trans = defaultdict(int), defaultdict(int), defaultdict(int)
+    for row in valid:
+        for p in {p["id"]: p for p in row["squad"]}.values(): counts[p["id"]] += 1
+        if row.get("captain"): caps[row["captain"]] += 1
+        for t in row.get("transfers", []): trans[(t["out"], t["in"])] += 1
+    players_rows=[]
+    for pid,n in sorted(counts.items(), key=lambda x:(-x[1], player_by_id.get(x[0],{}).get("name",""))):
+        p=player_by_id.get(pid)
+        if p: players_rows.append({"Player":p["name"],"Club":p["team"],"Pos":p["position"],"Elite":f"{n}/{total}","Elite %":round(100*n/total),"Model Score":round(blended_score(p),1),"FDR":round(p["fdr"],1)})
+    cap_rows=[{"Captain":k,"Managers":f"{v}/{total}","%":round(100*v/total)} for k,v in sorted(caps.items(),key=lambda x:-x[1])]
+    tr_rows=[{"Out":a,"In":b,"Managers":n} for (a,b),n in sorted(trans.items(),key=lambda x:-x[1])]
+    return players_rows, cap_rows, tr_rows, valid
+
+
+def render_elite_tracker():
+    st.header("🏆 Elite Manager Tracker")
+    st.caption("Five proven FPL Hall of Fame managers, their live squads/captains/transfers, and consensus compared with your team.")
+    st.info("The group is Abinav C, John Walsh, FPL Harry, Keilan Kenny and Nick (FPL Spartan), matching Fantasy Football Scout's 21 Aug 2026 Hall of Fame team-reveal group.")
+    with st.expander("⚙️ Manager Team IDs", expanded=False):
+        st.caption("Verified IDs are pre-filled. The two blank entries are deliberately not guessed; enter their current FPL Team IDs when known.")
+        ids={}
+        for name,meta in ELITE_MANAGERS.items():
+            default="" if meta["entry_id"] is None else str(meta["entry_id"])
+            ids[name]=st.text_input(f"{name} — HOF #{meta['hall_of_fame']}", value=default, key=f"elite_{name}")
+    with st.spinner("Following elite managers..."):
+        rows=[load_elite_manager(name,ids[name]) for name in ELITE_MANAGERS]
+    overview=[]
+    for r in rows:
+        overview.append({"Manager":r["name"],"HOF Rank":ELITE_MANAGERS[r["name"]]["hall_of_fame"],"Status":"🟢 Connected" if r.get("status")=="OK" else "🟠 ID needed", "GW Points":r.get("gw_points","—"),"Overall Rank":r.get("overall_rank","—"),"Captain":r.get("captain","—"),"Transfers":len(r.get("transfers",[]))})
+    st.dataframe(pd.DataFrame(overview),use_container_width=True,hide_index=True)
+    consensus,caps,trans,valid=elite_consensus(rows)
+    if not valid:
+        st.warning("No elite teams are connected yet. Enter the missing Team IDs above.")
+        return
+    a,b,c=st.columns(3); a.metric("Managers Connected",f"{len(valid)}/5"); b.metric("Captain Leader",caps[0]["Captain"] if caps else "—"); c.metric("Captain Consensus",caps[0]["Managers"] if caps else "—")
+    st.subheader("🔥 Most-Owned Elite Players")
+    st.dataframe(pd.DataFrame(consensus[:30]),use_container_width=True,hide_index=True)
+    c1,c2=st.columns(2)
+    with c1:
+        st.markdown("### 🧢 Captain Consensus"); st.dataframe(pd.DataFrame(caps),use_container_width=True,hide_index=True) if caps else st.info("No captain data yet.")
+    with c2:
+        st.markdown("### 🔄 Elite Transfers"); st.dataframe(pd.DataFrame(trans),use_container_width=True,hide_index=True) if trans else st.info("No current-GW transfers recorded.")
+    st.divider(); st.subheader("🆚 Elite Managers vs Your Team")
+    if not my_squad: st.info("Load your FPL Team ID in the sidebar to compare.")
+    else:
+        owned={p["id"] for p in my_squad}; comp=[]; threshold=max(2,(len(valid)+1)//2)
+        for r in consensus:
+            n=int(r["Elite"].split('/')[0])
+            if n<threshold: continue
+            p=next((x for x in players if x["name"]==r["Player"]),None)
+            if not p: continue
+            comp.append({"Player":p["name"],"Elite":r["Elite"],"You Own":"✅ Yes" if p["id"] in owned else "❌ No","Model Score":r["Model Score"],"FDR":r["FDR"],"Verdict":"🟢 Elite + Model target" if p["id"] not in owned and r["Model Score"]>=60 else "🟡 Elite pick — review" if p["id"] not in owned else "✅ Already owned"})
+        st.dataframe(pd.DataFrame(comp),use_container_width=True,hide_index=True) if comp else st.info("No strong consensus differences found.")
+    st.subheader("👤 Individual Elite Squads")
+    for r in valid:
+        with st.expander(f"{r['name']} — {r.get('entry_name','')}"):
+            st.dataframe(pd.DataFrame([{"Player":p["name"],"Club":p["team"],"Pos":p["position"],"Price":f"£{p['price']:.1f}m","Captain":"👑" if p["name"]==r.get("captain") else "","Model Score":round(blended_score(p),1)} for p in r["squad"]]),use_container_width=True,hide_index=True)
+            if r.get("transfers"): st.write("**Current GW transfers:** "+", ".join(f"{t['out']} → {t['in']}" for t in r["transfers"]))
+
+# ============================================================
 # UI HEADER / SIDEBAR
 # ============================================================
 st.title("⚽ FPL Assistant Manager")
@@ -1136,6 +1265,7 @@ tabs = st.tabs(
         "💊 Chips",
         "🕵️ Mini-League",
         "🏆 Best XI",
+        "🏆 Elite Managers",
         "📺 Creator AI",
         "💬 AI Assistant",
     ]
@@ -1942,9 +2072,16 @@ with tabs[9]:
 
 
 # ============================================================
-# TAB 11 — CREATOR AI
+# TAB 11 — ELITE MANAGERS
 # ============================================================
 with tabs[10]:
+    render_elite_tracker()
+
+
+# ============================================================
+# TAB 12 — CREATOR AI
+# ============================================================
+with tabs[11]:
     st.header(
         "📺 Creator Intelligence & AI Stress Test"
     )
@@ -2088,9 +2225,9 @@ Keep the answer structured and concise.
 
 
 # ============================================================
-# TAB 12 — AI ASSISTANT
+# TAB 13 — AI ASSISTANT
 # ============================================================
-with tabs[11]:
+with tabs[12]:
     st.header("💬 FPL AI Assistant")
 
     if not get_gemini_key():
